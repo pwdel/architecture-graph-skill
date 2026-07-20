@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from architecture_graph.ingest import IngestionContext
 from architecture_graph.ingest.diagrams import segment_diagram
 from architecture_graph.ingest.markdown import segment_markdown
@@ -63,3 +65,59 @@ def test_fenced_plantuml_inherits_markdown_section() -> None:
         "content_role": "diagram",
         "section_role": "decision",
     }
+
+
+PLANTUML_WITH_IGNORED_ARROWS = """\
+@startuml
+/' same-line comment -> Fake '/
+/'
+multiline comment -> Fake
+'/
+!define FAKE A -> B
+  !include fake -> target
+Checkout -> Orders : writes orders /' trailing comment -> Fake '/
+@enduml
+"""
+
+
+@pytest.mark.parametrize(
+    "relative_path", ["architecture/comments.puml", "architecture/comments.plantuml"]
+)
+def test_standalone_plantuml_ignores_comments_and_directives(
+    relative_path: str,
+) -> None:
+    result = segment_diagram(
+        source(relative_path, "plantuml", PLANTUML_WITH_IGNORED_ARROWS), CONTEXT
+    )
+
+    assert [item["text"] for item in result.segments] == [
+        "Checkout -> Orders : writes orders"
+    ]
+    assert [item["text"] for item in result.evidence] == [
+        "Checkout -> Orders : writes orders"
+    ]
+
+
+@pytest.mark.parametrize("language", ["plantuml", "puml"])
+def test_fenced_plantuml_ignores_comments_and_directives(language: str) -> None:
+    result = segment_markdown(
+        source(
+            "docs/architecture/comments.md",
+            "markdown",
+            f"# Runtime\n\n```{language}\n{PLANTUML_WITH_IGNORED_ARROWS}```\n",
+        ),
+        CONTEXT,
+    )
+
+    statements = [
+        item
+        for item in result.segments
+        if item["segment_kind"] == "diagram_statement"
+    ]
+    assert [item["text"] for item in statements] == [
+        "Checkout -> Orders : writes orders"
+    ]
+    statement_evidence = next(
+        item for item in result.evidence if item["segment_id"] == statements[0]["id"]
+    )
+    assert statement_evidence["text"] == "Checkout -> Orders : writes orders"

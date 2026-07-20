@@ -172,6 +172,7 @@ def diagram_statement_records(
     evidence: list[Record] = []
     warnings: list[Record] = []
     ignored_prefixes = ("graph ", "flowchart ", "sequenceDiagram", "@startuml", "@enduml")
+    in_plantuml_comment = False
 
     def statement_ranges(raw: str) -> list[tuple[int, int]] | None:
         ranges: list[tuple[int, int]] = []
@@ -220,73 +221,110 @@ def diagram_statement_records(
             end -= 1
         return start, end
 
+    def plantuml_content_ranges(raw: str) -> list[tuple[int, int]]:
+        nonlocal in_plantuml_comment
+
+        ranges: list[tuple[int, int]] = []
+        cursor = 0
+        while cursor < len(raw):
+            if in_plantuml_comment:
+                closing = raw.find("'/", cursor)
+                if closing == -1:
+                    return ranges
+                in_plantuml_comment = False
+                cursor = closing + 2
+                continue
+            opening = raw.find("/'", cursor)
+            if opening == -1:
+                ranges.append((cursor, len(raw)))
+                return ranges
+            if cursor < opening:
+                ranges.append((cursor, opening))
+            in_plantuml_comment = True
+            cursor = opening + 2
+        return ranges
+
     for line_number, raw in lines:
-        text = raw.strip()
-        if not text or text.startswith(("%%", "'")) or text.startswith(ignored_prefixes):
-            continue
-        if ARROW.search(text) is None:
-            continue
-        ranges = statement_ranges(raw)
-        candidates: list[tuple[int, int]] = []
-        if ranges is not None:
-            for start, end in ranges:
-                start, end = trimmed_range(raw, start, end)
-                if start < end and ARROW.search(raw[start:end]) is not None:
-                    candidates.append((start, end))
-        if ranges is None or any(
-            len(ARROW.findall(raw[start:end])) != 1 for start, end in candidates
-        ):
-            warnings.append(
-                warning_record(
-                    source,
-                    code="unsupported_construct",
-                    message="unsplittable compound Mermaid statement",
-                    span=SourceSpan(line_number, line_number, 1, len(raw) + 1),
-                    possible_role=section_role,
-                    derivation_ids=derivation_ids,
-                )
-            )
-            continue
-        for start, end in candidates:
-            statement = raw[start:end]
-            span = SourceSpan(line_number, line_number, start + 1, end + 1)
-            if len(statement) > max_segment_chars:
+        raw_ranges = [(0, len(raw))]
+        if language == "plantuml":
+            raw_ranges = plantuml_content_ranges(raw)
+            if raw.lstrip().startswith("!"):
+                continue
+        for raw_start, raw_end in raw_ranges:
+            content = raw[raw_start:raw_end]
+            text = content.strip()
+            if (
+                not text
+                or text.startswith(("%%", "'"))
+                or text.startswith(ignored_prefixes)
+            ):
+                continue
+            if ARROW.search(text) is None:
+                continue
+            ranges = statement_ranges(content)
+            candidates: list[tuple[int, int]] = []
+            if ranges is not None:
+                for start, end in ranges:
+                    start, end = trimmed_range(content, start, end)
+                    if start < end and ARROW.search(content[start:end]) is not None:
+                        candidates.append((start, end))
+            if ranges is None or any(
+                len(ARROW.findall(content[start:end])) != 1
+                for start, end in candidates
+            ):
                 warnings.append(
                     warning_record(
                         source,
-                        code="segment_too_large",
-                        message=(
-                            f"{language} statement exceeds max_segment_chars "
-                            f"at line {line_number}"
-                        ),
-                        span=span,
+                        code="unsupported_construct",
+                        message="unsplittable compound diagram statement",
+                        span=SourceSpan(line_number, line_number, 1, len(raw) + 1),
                         possible_role=section_role,
                         derivation_ids=derivation_ids,
                     )
                 )
                 continue
-            metadata: dict[str, object] = {
-                "diagram_language": language,
-                "content_role": "diagram",
-                "section_role": section_role,
-            }
-            if adr_id is not None:
-                metadata["adr_id"] = adr_id
-            if adr_status is not None:
-                metadata["adr_status"] = adr_status
-            segment, item_evidence = segment_and_evidence(
-                source,
-                segment_kind="diagram_statement",
-                segment_text=statement,
-                evidence_text=statement,
-                span=span,
-                heading_path=heading_path,
-                metadata=metadata,
-                derivation_ids=derivation_ids,
-                ordinal=ordinal_start + len(segments),
-            )
-            segments.append(segment)
-            evidence.append(item_evidence)
+            for start, end in candidates:
+                start += raw_start
+                end += raw_start
+                statement = raw[start:end]
+                span = SourceSpan(line_number, line_number, start + 1, end + 1)
+                if len(statement) > max_segment_chars:
+                    warnings.append(
+                        warning_record(
+                            source,
+                            code="segment_too_large",
+                            message=(
+                                f"{language} statement exceeds max_segment_chars "
+                                f"at line {line_number}"
+                            ),
+                            span=span,
+                            possible_role=section_role,
+                            derivation_ids=derivation_ids,
+                        )
+                    )
+                    continue
+                metadata: dict[str, object] = {
+                    "diagram_language": language,
+                    "content_role": "diagram",
+                    "section_role": section_role,
+                }
+                if adr_id is not None:
+                    metadata["adr_id"] = adr_id
+                if adr_status is not None:
+                    metadata["adr_status"] = adr_status
+                segment, item_evidence = segment_and_evidence(
+                    source,
+                    segment_kind="diagram_statement",
+                    segment_text=statement,
+                    evidence_text=statement,
+                    span=span,
+                    heading_path=heading_path,
+                    metadata=metadata,
+                    derivation_ids=derivation_ids,
+                    ordinal=ordinal_start + len(segments),
+                )
+                segments.append(segment)
+                evidence.append(item_evidence)
     return IngestionResult(
         segments=tuple(segments),
         evidence=tuple(evidence),
