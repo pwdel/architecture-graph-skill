@@ -1079,7 +1079,8 @@ Source-version identity and logical-source identity remain separate:
 - the next index resolves the selected layer to its base deterministic analysis parent, reads path-to-logical-ID and exact content-digest state only from that immutable parent, and obtains its Git baseline only from the observation selected by authoritative `current.json`; orphan observations never participate;
 - Phase 1 forms added/deleted candidates from the union of Git facts and parent/current selected-manifest path deltas, which allows configured-untracked paths to participate, then compares each current target digest only with exact parent source-record digests;
 - a logical ID moves only for a unique non-competing exact target-origin assignment. Tied exact assignments are ambiguous, while candidates without an exact match are unresolved; Phase 1 has no similarity fallback because snapshots do not persist parent raw bytes;
-- ambiguous and unresolved cases both create removal and addition plus a warning. Canonical unique-pair, tied, and unresolved cases all enter the deterministic snapshot `input_digest`.
+- when one transition changes an origin's existing path while adding another target with that origin's exact parent digest, path continuity and exact-digest movement are competing successors. Except for an independently authoritative explicit document ID, both current targets are ambiguous additions and neither inherits the parent logical ID;
+- ambiguous and unresolved cases both create removal and addition plus a warning. Canonical unique-pair, tied, competing-successor, and unresolved maps all enter the deterministic snapshot `input_digest`.
 
 `PROJECT.json` stores only immutable project identity/root metadata. It is never an append-only path history, so an orphaned failed publication cannot poison later logical-source resolution and a path reused after a rename receives a new logical ID.
 

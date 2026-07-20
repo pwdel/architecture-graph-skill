@@ -1996,7 +1996,7 @@ def observation_record(record_id: str) -> dict[str, object]:
             "material_input_digest": digest,
             "source_revision_digest": digest,
             "branch": "main",
-            "commit": "abc123",
+            "commit": "a" * 40,
             "dirty_fingerprint": digest,
             "observed_at": "2026-07-19T10:00:00Z",
         }
@@ -2386,10 +2386,12 @@ def bundle(path: str = "docs/adr/ADR-001.md") -> SnapshotBundle:
     )
 
 
-def observation(observed_at: str) -> dict[str, object]:
+def observation(
+    observed_at: str = "2026-07-19T10:00:00Z",
+) -> dict[str, object]:
     return {
         "branch": "main",
-        "commit": "abc123",
+        "commit": "a" * 40,
         "dirty_fingerprint": CONFIG_DIGEST,
         "observed_at": observed_at,
     }
@@ -6307,11 +6309,14 @@ git commit -m "feat: ingest structured and configured text sources"
 - Produces: `index_repository(root: Path, memory_root: Path | None = None, config_path: Path | None = None, observed_at: str | None = None) -> IndexResult`.
 - Adds CLI command: `architecture-graph index ROOT [--memory-root PATH] [--config PATH] [--json]`.
 - An absent implicit `ROOT/.architecture-graph.yaml` selects `ProjectConfig()` defaults. An explicit `--config` is resolved against `ROOT` when relative and must be a readable regular file; missing, unreadable, and directory-valued explicit paths are user-state failures. The CLI writes no stdout, writes one concise diagnostic to stderr, returns 2, and never changes `current.json` for these failures.
-- Resolves source lineage only against the deterministic analysis parent named by the observation selected in authoritative `current.json`. The selected observation is shape/content validated and must name the selected snapshot and the same base deterministic snapshot; orphan ledger rows are ignored. Its commit is the only Git baseline. Git status candidates are unioned with parent/current selected-manifest path deltas so configured-untracked renames participate. Git never supplies parent bytes: every current candidate is compared only with the exact `content_hash` persisted on the parent source record. Only a unique non-competing exact assignment is accepted. Tied exact matches are ambiguous; non-exact matches are unresolved because Phase 1 has no similarity fallback. Both use add/remove semantics and emit lineage warnings. Canonical pairs, ties, and unresolved cases enter `input_digest`.
-- `dirty_fingerprint` is an observation-only digest over a versioned canonical preimage containing status, mode, path, and exact staged/worktree/untracked content digests. Snapshot identity excludes branch, commit, dirty state, and time.
+- Publication and reuse accept a null commit or a lowercase 40/64-hex Git object ID only. The same shared validator runs before staging/locking and when the authoritative selected observation becomes a lineage baseline.
+- Resolves source lineage only against the deterministic analysis parent named by the observation selected in authoritative `current.json`. The selected observation is shape/content validated and must name the selected snapshot and the same base deterministic snapshot; orphan ledger rows are ignored. Its commit is the only Git baseline. Git status candidates are unioned with parent/current selected-manifest path deltas so configured-untracked renames participate. Git never supplies parent bytes: every current candidate is compared only with the exact `content_hash` persisted on the parent source record. Only a unique non-competing exact assignment is accepted. Tied exact matches, including an added exact-digest target competing with changed same-path continuity, are ambiguous; non-exact matches are unresolved because Phase 1 has no similarity fallback. Ambiguous current successors conservatively receive add/remove identities and warnings without degrading parse status. Canonical pairs, all ambiguous target-origin maps, and unresolved cases enter `input_digest`.
+- `dirty_fingerprint` is an observation-only digest over a versioned canonical preimage containing full file type/mode, status, path, and independent exact staged/worktree/untracked content digests. Repeated same-path staged `MM`, worktree, untracked, regular-file, and symlink states are distinguished. Snapshot identity excludes branch, commit, dirty state, and time.
+- Project identity obtains the remote through the same binary, strict UTF-8 Git boundary as other observations. Executable, command, remote-decoding, status-decoding, and path-decoding failures become `RepositoryStateError`.
 - Repository indexing uses a content-sensitive read window. Configuration bytes, fully materialized configuration, selected path/content facts, Git identity, and the versioned dirty preimage must match in two consecutive captures and again immediately before reuse/publication. A concurrent mutation raises a user-state error before pointer replacement; it never publishes inputs from one state with observation provenance from another.
 - `parse_status` describes adapter coverage only. Rename diagnostics remain in `source.warning_ids` but do not make a completely parsed source partial. A source-level `parse_failed` without segments is `failed`; any adapter/coverage warning with usable segments is `partial`; otherwise it is `complete`.
 - Freshness is `material_input_digest` equality with the selected snapshot. Thus an immediate index after an exact or unresolved rename reuses the selected snapshot; a byte-identical added path changes material identity but not source-revision identity; and changed-then-reverted bytes create a child of the currently selected deterministic analysis parent. A selected layered snapshot is preserved on unchanged material and its observation retains its base deterministic ID. End-to-end layered publication remains deferred only until Phase 2 installs kind-specific validators; this task tests the selection/baseline boundary with a validated layered fixture.
+- File-valued or unwritable memory roots and other storage `OSError`s produce one sanitized stderr diagnostic and exit 2 in human and JSON modes, with empty stdout and no pointer mutation. Snapshot/record `ValueError`s remain fail-fast.
 
 - [ ] **Step 1: Configure and create a complete temporary fixture repository**
 
@@ -6906,7 +6911,8 @@ def _load_config_text(root: Path, config_path: Path | None) -> str | None:
 `load_config()` returns `ProjectConfig()` only when `_load_config_text()` is
 `None`; otherwise it feeds that string to the existing YAML/schema logic.
 
-Replace the dirty-only status hash in `scripts/architecture_graph/project.py`.
+Replace the project-identity Git read and dirty-only status hash in
+`scripts/architecture_graph/project.py`.
 The exact schema below is persisted only through its digest, but the schema
 version makes later changes explicit. Git failures are sanitized here rather
 than exposing a subprocess traceback or repository-local stderr:
@@ -6929,22 +6935,31 @@ def _git_bytes_checked(root: Path, *args: str) -> bytes:
             check=True,
             capture_output=True,
         ).stdout
-    except FileNotFoundError as error:
-        raise RepositoryStateError("Git executable is unavailable") from error
+    except OSError as error:
+        raise RepositoryStateError("Git executable could not run") from error
     except subprocess.CalledProcessError as error:
         operation = args[0] if args else "command"
         raise RepositoryStateError(f"Git {operation} failed for repository") from error
 
 
-def _git_optional(root: Path, *args: str) -> str | None:
+def _git_optional(
+    root: Path,
+    *args: str,
+    absent_returncodes: tuple[int, ...] = (1,),
+) -> str | None:
     try:
         result = subprocess.run(
             ["git", "-C", str(root), *args],
             check=False,
             capture_output=True,
         )
-    except FileNotFoundError as error:
-        raise RepositoryStateError("Git executable is unavailable") from error
+    except OSError as error:
+        raise RepositoryStateError("Git executable could not run") from error
+    if result.returncode != 0:
+        if result.returncode in absent_returncodes:
+            return None
+        operation = args[0] if args else "command"
+        raise RepositoryStateError(f"Git {operation} failed for repository")
     try:
         value = result.stdout.decode("utf-8").strip()
     except UnicodeDecodeError as error:
@@ -6957,6 +6972,21 @@ def _decode_git_path(raw: bytes) -> str:
         return raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise RepositoryStateError("Git returned a non-UTF-8 path") from error
+
+
+def project_id(root: Path) -> str:
+    resolved = root.resolve()
+    remote = _git_optional(
+        resolved,
+        "config",
+        "--get",
+        "remote.origin.url",
+        absent_returncodes=(1,),
+    )
+    identity = f"{normalize_remote(remote or '')}\n{resolved.as_posix()}".encode(
+        "utf-8"
+    )
+    return hashlib.sha256(identity).hexdigest()
 
 
 def _path_digest(path: Path) -> str | None:
@@ -7075,7 +7105,9 @@ def capture_git_observation(
     root: Path, observed_at: str | None = None
 ) -> dict[str, JSONValue]:
     branch = _git_optional(root, "symbolic-ref", "--short", "-q", "HEAD")
-    commit = _git_optional(root, "rev-parse", "HEAD")
+    commit = _git_optional(
+        root, "rev-parse", "HEAD", absent_returncodes=(128,)
+    )
     dirty_preimage = _stable_dirty_preimage(root)
     timestamp = observed_at or datetime.now(timezone.utc).isoformat().replace(
         "+00:00", "Z"
@@ -7087,6 +7119,10 @@ def capture_git_observation(
         "observed_at": timestamp,
     }
 ```
+
+Remove the old `text=True` `_git()` helper after migrating `project_id()` and
+observation capture; no project-identity or observation call site may bypass
+the binary strict-decoding boundary.
 
 `_index_digest()` returns `None` only for an index-side deletion; every other
 staged state hashes the exact index bytes or fails visibly.
@@ -7105,12 +7141,17 @@ def _validated_observation(
     allowed = {"branch", "commit", "dirty_fingerprint", "observed_at"}
     if set(observation) != allowed:
         raise ValueError("observation fields are invalid")
-    for field in ("branch", "commit"):
-        value = observation[field]
-        if value is not None and (not isinstance(value, str) or not value):
-            raise ValueError(
-                f"observation {field} must be a nonempty string or null"
-            )
+    branch = observation["branch"]
+    if branch is not None and (not isinstance(branch, str) or not branch):
+        raise ValueError("observation branch must be a nonempty string or null")
+    commit = observation["commit"]
+    if commit is not None and (
+        not isinstance(commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit) is None
+    ):
+        raise ValueError(
+            "observation commit must be null or a lowercase SHA-1/SHA-256 object ID"
+        )
     dirty = observation["dirty_fingerprint"]
     if not isinstance(dirty, str) or DIGEST.fullmatch(dirty) is None:
         raise ValueError("observation dirty_fingerprint is invalid")
@@ -7135,10 +7176,27 @@ The first executable line in `publish_snapshot()` is
 before entering `ProjectLock`. This closes the known staging leak as part of
 Task 10 rather than deferring it to Task 12.
 
+In the existing `tests/test_snapshot.py`, replace its shared helper before
+adding the new regressions:
+
+```python
+def observation(
+    observed_at: str = "2026-07-19T10:00:00Z",
+) -> dict[str, object]:
+    return {
+        "branch": "main",
+        "commit": "a" * 40,
+        "dirty_fingerprint": CONFIG_DIGEST,
+        "observed_at": observed_at,
+    }
+```
+
 Add focused Task 10 regressions to `tests/test_sources.py` and
 `tests/test_snapshot.py`:
 
 ```python
+import subprocess
+
 from architecture_graph.config import ConfigurationPathError, ProjectConfig
 from architecture_graph.project import RepositoryStateError, capture_git_observation
 
@@ -7162,6 +7220,27 @@ def test_dirty_fingerprint_changes_for_repeated_same_path_edits(
     tracked.write_text("first dirty value\n")
     first = capture_git_observation(architecture_repo)["dirty_fingerprint"]
     tracked.write_text("second dirty value\n")
+    second = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    assert second != first
+
+
+def test_dirty_fingerprint_tracks_repeated_staged_bytes_independently(
+    architecture_repo: Path,
+) -> None:
+    from conftest import git
+
+    tracked = architecture_repo / "docs" / "adr" / "ADR-001.md"
+    relative = "docs/adr/ADR-001.md"
+    tracked.write_text("first staged value\n")
+    git(architecture_repo, "add", relative)
+    tracked.write_text("fixed worktree value\n")
+    assert git(architecture_repo, "status", "--short", relative).startswith("MM ")
+    first = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+
+    tracked.write_text("second staged value\n")
+    git(architecture_repo, "add", relative)
+    tracked.write_text("fixed worktree value\n")
+    assert git(architecture_repo, "status", "--short", relative).startswith("MM ")
     second = capture_git_observation(architecture_repo)["dirty_fingerprint"]
     assert second != first
 
@@ -7222,6 +7301,37 @@ def test_malformed_git_status_path_fails_as_repository_state(
         _dirty_preimage_once(architecture_repo)
 
 
+def test_project_id_rejects_non_utf8_remote_as_repository_state(
+    architecture_repo: Path, monkeypatch
+) -> None:
+    from architecture_graph.project import project_id
+
+    monkeypatch.setattr(
+        "architecture_graph.project.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout=b"\xff", stderr=b""
+        ),
+    )
+    with pytest.raises(RepositoryStateError, match="non-UTF-8 identity output"):
+        project_id(architecture_repo)
+
+
+@pytest.mark.parametrize("failure", ["executable", "git"])
+def test_project_id_maps_git_failures_to_repository_state(
+    architecture_repo: Path, monkeypatch, failure: str
+) -> None:
+    from architecture_graph.project import project_id
+
+    def fail(*args, **kwargs):
+        if failure == "executable":
+            raise PermissionError("cannot execute Git")
+        return subprocess.CompletedProcess(args[0], 2, stdout=b"", stderr=b"failed")
+
+    monkeypatch.setattr("architecture_graph.project.subprocess.run", fail)
+    with pytest.raises(RepositoryStateError, match="Git .*failed|could not run"):
+        project_id(architecture_repo)
+
+
 def test_invalid_observation_is_rejected_before_staging(
     tmp_path: Path,
 ) -> None:
@@ -7238,15 +7348,76 @@ def test_invalid_observation_is_rejected_before_staging(
     assert not project.current_path.exists()
 
 
-@pytest.mark.parametrize("field", ["branch", "commit"])
-def test_empty_observation_identity_field_is_rejected_before_staging(
-    tmp_path: Path, field: str
+def test_empty_observation_branch_is_rejected_before_staging(
+    tmp_path: Path,
 ) -> None:
     project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
-    invalid = observation()
-    invalid[field] = ""
+    invalid = {**observation(), "branch": ""}
     with pytest.raises(ValueError, match="nonempty string or null"):
         publish_snapshot(project, bundle(), invalid, None)
+    staging = project.project_dir / ".staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
+
+
+@pytest.mark.parametrize("commit", [None, "a" * 40, "b" * 64])
+def test_observation_accepts_null_sha1_and_sha256_commits(
+    tmp_path: Path, commit: str | None
+) -> None:
+    project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
+    published = publish_snapshot(
+        project,
+        bundle(),
+        {**observation(), "commit": commit},
+        None,
+    )
+    assert SnapshotReader.open(project).snapshot_id == published.snapshot_id
+    observed = observe_existing_snapshot(
+        project,
+        SnapshotReader.open(project, published.snapshot_id),
+        {
+            **observation("2026-07-19T11:00:00Z"),
+            "commit": commit,
+        },
+        published.snapshot_id,
+    )
+    assert observed.snapshot_id == published.snapshot_id
+
+
+@pytest.mark.parametrize("commit", ["", "abc123", "A" * 40, "g" * 40])
+def test_publish_rejects_invalid_commit_before_any_write(
+    tmp_path: Path, commit: str
+) -> None:
+    project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
+    with pytest.raises(ValueError, match="lowercase SHA-1/SHA-256"):
+        publish_snapshot(
+            project,
+            bundle(),
+            {**observation(), "commit": commit},
+            None,
+        )
+    assert not project.current_path.exists()
+    assert not project.observations_path.exists()
+    staging = project.project_dir / ".staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
+
+
+def test_observe_rejects_invalid_commit_without_pointer_or_ledger_write(
+    tmp_path: Path,
+) -> None:
+    project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
+    first = publish_snapshot(project, bundle(), observation(), None)
+    reader = SnapshotReader.open(project, first.snapshot_id)
+    pointer_before = project.current_path.read_bytes()
+    ledger_before = project.observations_path.read_bytes()
+    with pytest.raises(ValueError, match="lowercase SHA-1/SHA-256"):
+        observe_existing_snapshot(
+            project,
+            reader,
+            {**observation("2026-07-19T11:00:00Z"), "commit": "invalid"},
+            first.snapshot_id,
+        )
+    assert project.current_path.read_bytes() == pointer_before
+    assert project.observations_path.read_bytes() == ledger_before
     staging = project.project_dir / ".staging"
     assert not staging.exists() or list(staging.iterdir()) == []
 ```
@@ -7261,7 +7432,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-import re
 import subprocess
 from collections.abc import Mapping, Sequence
 
@@ -7358,8 +7528,8 @@ class RenameResolution:
         return {
             "pairs": [[new, old] for new, old in sorted(self.pairs.items())],
             "ambiguous_targets": [
-                [new, list(old_paths)]
-                for new, old_paths in sorted(self.ambiguous_targets.items())
+                [target, list(origins)]
+                for target, origins in sorted(self.ambiguous_targets.items())
             ],
             "unresolved_targets": [
                 [new, list(old_paths)]
@@ -7377,10 +7547,10 @@ class RenameResolution:
                 if new in new_paths and old in prior_paths
             },
             {
-                new: tuple(old for old in old_paths if old in prior_paths)
-                for new, old_paths in self.ambiguous_targets.items()
-                if new in new_paths
-                and len([old for old in old_paths if old in prior_paths]) > 0
+                target: tuple(origin for origin in origins if origin in prior_paths)
+                for target, origins in self.ambiguous_targets.items()
+                if target in new_paths
+                and len([origin for origin in origins if origin in prior_paths]) > 0
             },
             {
                 new: tuple(old for old in old_paths if old in prior_paths)
@@ -7409,7 +7579,7 @@ def _git_rename_resolution(
                 check=True,
                 capture_output=True,
             ).stdout
-        except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        except (OSError, subprocess.CalledProcessError) as error:
             operation = args[0] if args else "command"
             raise RepositoryStateError(
                 f"Git {operation} failed while resolving source lineage"
@@ -7446,20 +7616,33 @@ def _git_rename_resolution(
             if path in new_paths
         )
 
+    changed_same_paths = {
+        path
+        for path in new_paths.intersection(prior_paths)
+        if current_content_hashes[path] != prior_content_hashes[path]
+    }
     tentative: dict[str, str] = {}
-    ambiguous: dict[str, tuple[str, ...]] = {}
+    ambiguous_sets: dict[str, set[str]] = {}
     for new in sorted(added):
         candidates = tuple(
             old
-            for old in sorted(deleted)
+            for old in sorted(deleted | changed_same_paths)
             if prior_content_hashes[old] == current_content_hashes[new]
         )
         if not candidates:
             continue
+        competing_same_paths = tuple(
+            old for old in candidates if old in changed_same_paths
+        )
+        if competing_same_paths:
+            ambiguous_sets.setdefault(new, set()).update(candidates)
+            for old in competing_same_paths:
+                ambiguous_sets.setdefault(old, set()).add(old)
+            continue
         if len(candidates) == 1:
             tentative[new] = candidates[0]
         else:
-            ambiguous[new] = candidates
+            ambiguous_sets.setdefault(new, set()).update(candidates)
 
     pairs: dict[str, str] = {}
     claimed_by_old: dict[str, list[str]] = {}
@@ -7470,7 +7653,11 @@ def _git_rename_resolution(
             pairs[claims[0]] = old
         else:
             for new in sorted(claims):
-                ambiguous[new] = (old,)
+                ambiguous_sets.setdefault(new, set()).add(old)
+    ambiguous = {
+        target: tuple(sorted(origins))
+        for target, origins in sorted(ambiguous_sets.items())
+    }
     unresolved = {
         new: tuple(sorted(deleted))
         for new in sorted(added)
@@ -7514,7 +7701,7 @@ def _selected_observation_commit(
         raise ValueError("selected observation is missing")
     validate_record(observation, "observation")
     validate_record_shape(observation)
-    _validated_observation(
+    validated_observation = _validated_observation(
         {
             "branch": observation["branch"],
             "commit": observation["commit"],
@@ -7541,13 +7728,8 @@ def _selected_observation_commit(
         or pointer["published_at"] != observation["observed_at"]
     ):
         raise ValueError("current pointer timestamp does not match selected observation")
-    commit = observation["commit"]
-    if commit is not None and (
-        not isinstance(commit, str)
-        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit) is None
-    ):
-        raise ValueError("selected observation commit is invalid")
-    return commit
+    validated_commit = validated_observation["commit"]
+    return None if validated_commit is None else str(validated_commit)
 
 
 def _logical_source_ids(
@@ -7566,6 +7748,7 @@ def _logical_source_ids(
         }
     )
     renames = rename_resolution.pairs
+    ambiguous_targets = set(rename_resolution.ambiguous_targets)
     metadata_by_source = _source_metadata(ingestion)
     explicit_content_hashes: dict[str, str] = {}
     resolved: dict[str, str] = {}
@@ -7589,6 +7772,15 @@ def _logical_source_ids(
                 )
             explicit_content_hashes[explicit] = source.content_hash
             logical_id = stable_id("logical-source", "explicit", explicit)
+        elif source.relative_path in ambiguous_targets:
+            logical_id = stable_id(
+                "logical-source",
+                project.project_id,
+                analysis_parent.snapshot_id if analysis_parent is not None else "genesis",
+                "ambiguous-add-remove",
+                source.relative_path,
+                source.content_hash,
+            )
         elif source.relative_path in prior_paths:
             logical_id = str(prior_paths[source.relative_path])
         elif (
@@ -7672,8 +7864,8 @@ def _rename_resolution_warnings(
                 code=code,
                 message=(
                     (
-                        f"Git rename target {target} has a non-unique exact-digest "
-                        "origin assignment involving: "
+                        f"Source lineage target {target} has a competing "
+                        "exact-digest/path-continuity origin assignment involving: "
                     )
                     if code == "ambiguous_rename"
                     else (
@@ -8188,6 +8380,72 @@ def test_configured_untracked_exact_rename_uses_manifest_delta(
     assert new["logical_source_id"] == old["logical_source_id"]
 
 
+def test_same_transition_move_and_old_path_replacement_is_ambiguous(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    from conftest import git
+
+    old_relative = "docs/architecture/runtime.md"
+    new_relative = "docs/architecture/moved-runtime.md"
+    old_path = phase1_repository / old_relative
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_text("# Runtime\n\nWorkers use the original queue.\n")
+    git(phase1_repository, "add", old_relative)
+    git(phase1_repository, "commit", "-m", "add runtime")
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    parent = SnapshotReader.open(project, first.snapshot_id)
+    parent_source = _source_at(parent, old_relative)
+
+    git(phase1_repository, "mv", old_relative, new_relative)
+    old_path.write_text("# Replacement\n\nWorkers use a replacement queue.\n")
+    git(phase1_repository, "add", old_relative, new_relative)
+    git(phase1_repository, "commit", "-m", "move and replace runtime")
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    current = {
+        path: _source_at(reader, path) for path in (old_relative, new_relative)
+    }
+    assert all(
+        source["logical_source_id"] != parent_source["logical_source_id"]
+        for source in current.values()
+    )
+    assert all(source["parse_status"] == "complete" for source in current.values())
+    warnings = [
+        item for item in reader.iter("warnings") if item["code"] == "ambiguous_rename"
+    ]
+    assert {item["source_version_id"] for item in warnings} == {
+        current[old_relative]["id"],
+        current[new_relative]["id"],
+    }
+    for path, source in current.items():
+        expected_warning_ids = {
+            item["id"]
+            for item in warnings
+            if item["source_version_id"] == source["id"]
+        }
+        assert expected_warning_ids.issubset(set(source["warning_ids"])), path
+    resolution = RenameResolution(
+        {},
+        {
+            new_relative: (old_relative,),
+            old_relative: (old_relative,),
+        },
+        {},
+    )
+    assert reader.manifest["input_digest"] == sha256_digest(
+        canonical_bytes(
+            {
+                "material_input_digest": reader.manifest["material_input_digest"],
+                "source_revision_digest": reader.manifest["source_revision_digest"],
+                "analysis_parent_snapshot_id": first.snapshot_id,
+                "rename_resolution": resolution.as_digest_input(),
+            }
+        )
+    )
+
+
 def test_orphan_observation_is_not_a_lineage_baseline(
     phase1_repository: Path, tmp_path: Path
 ) -> None:
@@ -8286,7 +8544,7 @@ def test_malformed_selected_observation_fails_before_lineage_or_pointer_change(
         }
     )
     write_records(project.observations_path, [malformed])
-    with pytest.raises(ValueError, match="selected observation commit is invalid"):
+    with pytest.raises(ValueError, match="lowercase SHA-1/SHA-256"):
         index_repository(phase1_repository, memory_root=memory)
     assert project.current_path.read_bytes() == before
     assert first.snapshot_id == pointer["snapshot_id"]
@@ -8554,7 +8812,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Indexed {payload['source_count']} sources into {payload['snapshot_id']}"
                 )
             return 0
-    except (FileNotFoundError, RuntimeError) as error:
+    except OSError as error:
+        print(
+            "architecture-graph: filesystem operation failed "
+            f"({type(error).__name__})",
+            file=sys.stderr,
+        )
+        return 2
+    except RuntimeError as error:
         print(f"architecture-graph: {error}", file=sys.stderr)
         return 2
     parser.error(f"unknown command: {args.command}")
@@ -8567,9 +8832,10 @@ if __name__ == "__main__":
 
 The library remains fail-fast. In particular, snapshot/record validation
 `ValueError`s are not flattened by the CLI. Configuration, repository, Git,
-path, and CAS user-state errors reach this boundary as `RuntimeError`
-subclasses (or a missing immutable snapshot as `FileNotFoundError`). Both human
-and `--json` modes use the same stderr-only error contract.
+and CAS user-state errors reach this boundary as `RuntimeError` subclasses.
+Filesystem `OSError`s, including missing immutable snapshots and unusable
+memory roots, receive a sanitized type-only diagnostic. Both human and `--json`
+modes use the same stderr-only error contract.
 
 - [ ] **Step 8: Test CLI stdout/stderr/exit behavior and pointer preservation**
 
@@ -8625,6 +8891,63 @@ def test_non_repository_cli_failure_is_stderr_only(
     assert captured.err.startswith("architecture-graph: ")
     assert "Traceback" not in captured.err
     assert not (tmp_path / "memory").exists()
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_file_valued_memory_root_is_stderr_only(
+    phase1_repository: Path, tmp_path: Path, capsys, json_mode: bool
+) -> None:
+    memory_file = tmp_path / "memory-file"
+    memory_file.write_bytes(b"sentinel")
+    argv = [
+        "index",
+        str(phase1_repository),
+        "--memory-root",
+        str(memory_file),
+    ]
+    if json_mode:
+        argv.append("--json")
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.endswith("(NotADirectoryError)\n")
+    assert len(captured.err.splitlines()) == 1
+    assert memory_file.read_bytes() == b"sentinel"
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_unwritable_memory_root_is_stderr_only_and_preserves_pointer(
+    phase1_repository: Path,
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    json_mode: bool,
+) -> None:
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    pointer_before = project.current_path.read_bytes()
+    adr = phase1_repository / "docs" / "adr" / "ADR-001-events.md"
+    adr.write_text(adr.read_text() + "\nChanged material.\n")
+
+    def deny_write(*args, **kwargs):
+        raise PermissionError("simulated unwritable memory root")
+
+    monkeypatch.setattr("architecture_graph.snapshot._write_stage", deny_write)
+    argv = [
+        "index",
+        str(phase1_repository),
+        "--memory-root",
+        str(memory),
+    ]
+    if json_mode:
+        argv.append("--json")
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.endswith("(PermissionError)\n")
+    assert len(captured.err.splitlines()) == 1
+    assert project.current_path.read_bytes() == pointer_before
 
 
 def test_index_cli_human_success_uses_stdout_only(
@@ -8688,6 +9011,16 @@ uv run pytest tests/test_phase1_cli.py tests/test_snapshot.py tests/test_other_i
 uv run pytest -q
 uv run python -m compileall -q scripts
 ```
+
+The focused acceptance matrix must include:
+
+| Boundary | Required cases |
+| --- | --- |
+| Observation commit | null, lowercase SHA-1, lowercase SHA-256 accepted; empty/short/uppercase/non-hex rejected before both publish and reuse writes |
+| Competing lineage | one-transition move plus old-path replacement gives neither path-fallback successor the parent logical ID, warns both, preserves complete parse status, and binds the whole ambiguous map into `input_digest` |
+| Project identity Git read | non-UTF-8 remote, executable failure, and non-optional Git failure become `RepositoryStateError` |
+| Memory storage path | file-valued and simulated unwritable roots return 2 with empty stdout, one diagnostic, and no pointer mutation in human and JSON modes |
+| Dirty fingerprint | repeated same-path staged `MM` changes with fixed worktree bytes, worktree changes, untracked changes, and regular/symlink type changes all change the digest |
 
 Expected: the focused tests pass, the complete suite passes, and compileall exits 0.
 
