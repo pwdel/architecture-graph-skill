@@ -3886,6 +3886,7 @@ git commit -m "feat: segment ADRs and Mermaid evidence"
 - Modify: `scripts/architecture_graph/ingest/diagrams.py`
 - Modify: `scripts/architecture_graph/ingest/markdown.py`
 - Modify: `tests/test_markdown_ingest.py`
+- Modify: `tests/test_markdown_ingest_regressions.py`
 
 **Interfaces:**
 - Produces: `IngestionContext(configuration_digest, pipeline_digest, tool_version, max_segment_chars=8_000)`.
@@ -3893,9 +3894,11 @@ git commit -m "feat: segment ADRs and Mermaid evidence"
 - Changes shared builders to accept all actual derivation IDs and separate normalized segment text from exact source evidence text.
 - Bounds and segments the supported ADR front-matter fields (`id`, `title`, `date`, `status`). Other front-matter keys remain outside the Phase 1 semantic contract and are not used as size-bound test inputs.
 
+**Preservation requirement:** Task 7 is a delta on the reviewed Task 6 parser, not permission to restore an older replacement snippet. Preserve strict YAML node and JSON-safe value validation, rejection of exact/NFKC key collisions and all YAML aliases, CommonMark `-`/`+`/`*`/ordered list boundaries, exact source-slice evidence, semicolon-bounded Mermaid statements, and fail-closed diagram warnings. Where the sample replacements below differ, port the Task 7 context/provenance/bounding changes into the current hardened implementation. Migrate every `segment_markdown` call in both Markdown test modules to the required context and keep all Task 6 regressions green.
+
 - [ ] **Step 1: Add failing provenance, recovery, and exact-evidence tests**
 
-In `tests/test_markdown_ingest.py`, add this context and pass it as the second argument in every existing `segment_markdown` call:
+In `tests/test_markdown_ingest.py`, add this context and pass it as the second argument in every existing `segment_markdown` call. Import the same context in `tests/test_markdown_ingest_regressions.py` and pass it to every call there as well:
 
 ```python
 from architecture_graph.ingest import IngestionContext
@@ -4349,9 +4352,9 @@ def diagram_statement_records(
     )
 ```
 
-- [ ] **Step 4: Replace Markdown ingestion atomically with bounded, recovering behavior**
+- [ ] **Step 4: Apply bounded, recovering context behavior to the hardened Markdown parser**
 
-Replace `scripts/architecture_graph/ingest/markdown.py` with:
+Use the following as the Task 7 context/provenance/bounding contract, while retaining every Task 6 preservation requirement above:
 
 ```python
 from __future__ import annotations
@@ -4785,7 +4788,7 @@ def segment_markdown(
 - [ ] **Step 5: Run the hardening regression**
 
 ```bash
-uv run pytest tests/test_markdown_ingest.py tests/test_canonical.py -q
+uv run pytest tests/test_markdown_ingest.py tests/test_markdown_ingest_regressions.py tests/test_canonical.py -q
 uv run pytest -q
 ```
 
@@ -4794,7 +4797,7 @@ Expected: focused and cumulative tests pass. No derivation contains a hard-coded
 - [ ] **Step 6: Commit provenance-complete Markdown ingestion**
 
 ```bash
-git add scripts/architecture_graph/ingest tests/test_markdown_ingest.py
+git add scripts/architecture_graph/ingest tests/test_markdown_ingest.py tests/test_markdown_ingest_regressions.py
 git commit -m "fix: make ingestion evidence and provenance complete"
 ```
 
