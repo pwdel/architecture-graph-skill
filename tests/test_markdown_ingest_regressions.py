@@ -70,6 +70,53 @@ def test_recursive_yaml_alias_warns_without_emitting_records() -> None:
     assert "recursive" in str(result.warnings[0]["message"])
 
 
+def test_shared_acyclic_yaml_alias_warns_without_emitting_records() -> None:
+    source = markdown_source(
+        "---\n"
+        "defaults: &base {region: us}\n"
+        "a: *base\n"
+        "b: *base\n"
+        "id: ADR-ALIASES\n"
+        "status: accepted\n"
+        "---\n"
+        "# Ignored after aliased metadata\n"
+    )
+
+    first = segment_markdown(source)
+    second = segment_markdown(source)
+
+    assert first.segments == ()
+    assert first.evidence == ()
+    assert [warning["code"] for warning in first.warnings] == [
+        "unsupported_construct"
+    ]
+    assert "alias" in str(first.warnings[0]["message"])
+    assert second.warnings[0]["id"] == first.warnings[0]["id"]
+
+
+def test_nested_yaml_without_aliases_remains_supported() -> None:
+    result = segment_markdown(
+        markdown_source(
+            "---\n"
+            "id: ADR-NESTED\n"
+            "status: accepted\n"
+            "defaults:\n"
+            "  region: us\n"
+            "  zones:\n"
+            "    - central\n"
+            "---\n"
+            "# Nested metadata\n"
+        )
+    )
+
+    assert result.warnings == ()
+    assert [
+        segment["metadata"]["metadata_key"]
+        for segment in result.segments
+        if segment["segment_kind"] == "metadata_field"
+    ] == ["id", "status"]
+
+
 def test_commonmark_list_markers_emit_one_segment_per_item() -> None:
     result = segment_markdown(
         markdown_source(

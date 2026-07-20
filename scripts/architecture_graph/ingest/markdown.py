@@ -62,15 +62,23 @@ class FrontMatterError(ValueError):
     pass
 
 
-def _validate_yaml_node(node: Node, active: set[int] | None = None) -> None:
+def _validate_yaml_node(
+    node: Node,
+    visited: set[int] | None = None,
+    active: set[int] | None = None,
+) -> None:
+    visited = set() if visited is None else visited
     active = set() if active is None else active
     identity = id(node)
     if identity in active:
         raise FrontMatterError("recursive YAML alias in front matter")
+    if identity in visited:
+        raise FrontMatterError("YAML aliases are unsupported in front matter")
+    visited.add(identity)
     active.add(identity)
     try:
         if isinstance(node, MappingNode):
-            seen: dict[str, str] = {}
+            normalized_keys: dict[str, str] = {}
             for key_node, value_node in node.value:
                 if (
                     not isinstance(key_node, ScalarNode)
@@ -79,21 +87,22 @@ def _validate_yaml_node(node: Node, active: set[int] | None = None) -> None:
                     raise FrontMatterError(
                         "front matter mapping keys must be string scalars"
                     )
+                _validate_yaml_node(key_node, visited, active)
                 key = key_node.value
                 normalized = unicodedata.normalize("NFKC", key)
-                if normalized in seen:
-                    previous = seen[normalized]
+                if normalized in normalized_keys:
+                    previous = normalized_keys[normalized]
                     if previous == key:
                         raise FrontMatterError(f"duplicate front matter key: {key}")
                     raise FrontMatterError(
                         "normalized front matter key collision: "
                         f"{previous!r} and {key!r}"
                     )
-                seen[normalized] = key
-                _validate_yaml_node(value_node, active)
+                normalized_keys[normalized] = key
+                _validate_yaml_node(value_node, visited, active)
         elif isinstance(node, SequenceNode):
             for item in node.value:
-                _validate_yaml_node(item, active)
+                _validate_yaml_node(item, visited, active)
     finally:
         active.remove(identity)
 
