@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
+from architecture_graph.canonical import canonicalize
 from architecture_graph.ingest import IngestionResult
 from architecture_graph.ingest.diagrams import (
     derivation_record,
     diagram_statement_records,
+    exact_source_excerpt,
     segment_and_evidence,
     warning_record,
 )
@@ -17,6 +21,8 @@ from architecture_graph.sources import SourceInput
 
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 FENCE_OPEN = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
+LIST_ITEM = re.compile(r"^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+")
+YAML_STRING_TAG = "tag:yaml.org,2002:str"
 SECTION_ROLES = {
     "context": "context",
     "driver": "rationale",
@@ -51,6 +57,65 @@ def _is_closing_fence(raw: str, marker: str, opening_length: int) -> bool:
     ) is not None
 
 
+class FrontMatterError(ValueError):
+    pass
+
+
+def _validate_yaml_node(node: Node) -> None:
+    if isinstance(node, MappingNode):
+        seen: dict[str, str] = {}
+        for key_node, value_node in node.value:
+            if not isinstance(key_node, ScalarNode) or key_node.tag != YAML_STRING_TAG:
+                raise FrontMatterError(
+                    "front matter mapping keys must be string scalars"
+                )
+            key = key_node.value
+            normalized = unicodedata.normalize("NFKC", key)
+            if normalized in seen:
+                previous = seen[normalized]
+                if previous == key:
+                    raise FrontMatterError(f"duplicate front matter key: {key}")
+                raise FrontMatterError(
+                    "normalized front matter key collision: "
+                    f"{previous!r} and {key!r}"
+                )
+            seen[normalized] = key
+            _validate_yaml_node(value_node)
+    elif isinstance(node, SequenceNode):
+        for item in node.value:
+            _validate_yaml_node(item)
+
+
+def _parse_front_matter(
+    raw_metadata: str,
+) -> tuple[dict[str, object], dict[str, SourceSpan]]:
+    node = yaml.compose(raw_metadata, Loader=yaml.SafeLoader)
+    if not isinstance(node, MappingNode):
+        raise FrontMatterError("front matter must be a mapping")
+    _validate_yaml_node(node)
+    loaded = yaml.safe_load(raw_metadata)
+    if not isinstance(loaded, dict):
+        raise FrontMatterError("front matter must be a mapping")
+    try:
+        canonicalize(loaded)
+    except (TypeError, ValueError) as error:
+        raise FrontMatterError(
+            f"front matter values must be canonical JSON: {error}"
+        ) from error
+
+    metadata = {str(key): value for key, value in loaded.items()}
+    spans = {
+        key_node.value: SourceSpan(
+            key_node.start_mark.line + 2,
+            value_node.end_mark.line + 2,
+            key_node.start_mark.column + 1,
+            value_node.end_mark.column + 1,
+        )
+        for key_node, value_node in node.value
+    }
+    return metadata, spans
+
+
 def segment_markdown(source: SourceInput) -> IngestionResult:
     derivation = derivation_record(source, "markdown_segmenter")
     derivation_id = str(derivation["id"])
@@ -67,20 +132,16 @@ def segment_markdown(source: SourceInput) -> IngestionResult:
 
     lines = source.text.splitlines()
     metadata: dict[str, object] = {}
-    metadata_lines: dict[str, int] = {}
+    metadata_spans: dict[str, SourceSpan] = {}
     cursor = 0
     if lines and lines[0].strip() == "---":
         try:
             closing = next(index for index in range(1, len(lines)) if lines[index].strip() == "---")
-            raw_metadata = yaml.safe_load("\n".join(lines[1:closing])) or {}
-            if isinstance(raw_metadata, dict):
-                metadata = {str(key): value for key, value in raw_metadata.items()}
-                for index, raw_line in enumerate(lines[1:closing], start=2):
-                    match = re.match(r"^([A-Za-z0-9_-]+)\s*:", raw_line)
-                    if match and match.group(1) not in metadata_lines:
-                        metadata_lines[match.group(1)] = index
+            metadata, metadata_spans = _parse_front_matter(
+                "\n".join(lines[1:closing])
+            )
             cursor = closing + 1
-        except (StopIteration, yaml.YAMLError) as error:
+        except (StopIteration, FrontMatterError, yaml.YAMLError) as error:
             warning = warning_record(
                 source,
                 code="unsupported_construct",
@@ -98,15 +159,16 @@ def segment_markdown(source: SourceInput) -> IngestionResult:
     paragraph: list[tuple[int, str]] = []
 
     for key in ("id", "status"):
-        if key not in metadata or key not in metadata_lines:
+        if key not in metadata or key not in metadata_spans:
             continue
-        line_number = metadata_lines[key]
-        text = lines[line_number - 1].strip()
+        span = metadata_spans[key]
+        evidence_text = exact_source_excerpt(source, span)
         segment, item_evidence = segment_and_evidence(
             source,
             segment_kind="metadata_field",
-            text=text,
-            span=SourceSpan(line_number, line_number),
+            text=evidence_text,
+            evidence_text=evidence_text,
+            span=span,
             heading_path=(),
             metadata={
                 "section_role": "status" if key == "status" else "context",
@@ -134,12 +196,20 @@ def segment_markdown(source: SourceInput) -> IngestionResult:
             return
         text = " ".join(line.strip() for _, line in paragraph).strip()
         if text:
-            span = SourceSpan(paragraph[0][0], paragraph[-1][0])
-            segment_kind = "list_item" if paragraph[0][1].lstrip().startswith(("- ", "* ")) else "paragraph"
+            span = SourceSpan(
+                paragraph[0][0],
+                paragraph[-1][0],
+                1,
+                len(paragraph[-1][1]) + 1,
+            )
+            segment_kind = (
+                "list_item" if LIST_ITEM.match(paragraph[0][1]) else "paragraph"
+            )
             segment, item_evidence = segment_and_evidence(
                 source,
                 segment_kind=segment_kind,
                 text=text,
+                evidence_text=exact_source_excerpt(source, span),
                 span=span,
                 heading_path=heading_path(),
                 metadata={
@@ -192,6 +262,7 @@ def segment_markdown(source: SourceInput) -> IngestionResult:
                 )
                 segments.extend(result.segments)
                 evidence.extend(result.evidence)
+                warnings.extend(result.warnings)
             else:
                 warnings.append(
                     warning_record(
@@ -219,6 +290,7 @@ def segment_markdown(source: SourceInput) -> IngestionResult:
                 source,
                 segment_kind="heading",
                 text=title,
+                evidence_text=raw,
                 span=SourceSpan(line_number, line_number, 1, len(raw) + 1),
                 heading_path=heading_path(),
                 metadata={
@@ -236,7 +308,7 @@ def segment_markdown(source: SourceInput) -> IngestionResult:
             continue
         if not raw.strip():
             emit_paragraph()
-        elif raw.lstrip().startswith(("- ", "* ")):
+        elif LIST_ITEM.match(raw):
             emit_paragraph()
             paragraph.append((line_number, raw))
             emit_paragraph()
