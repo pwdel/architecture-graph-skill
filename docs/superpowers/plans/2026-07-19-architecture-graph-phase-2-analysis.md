@@ -96,6 +96,8 @@
 ### Task 1: Analysis Types, Typed Schemas, and Versioned Rules
 
 **Files:**
+- Modify: `scripts/architecture_graph/canonical.py`
+- Modify: `scripts/architecture_graph/records.py`
 - Create: `scripts/architecture_graph/analysis_types.py`
 - Create: `scripts/architecture_graph/schemas.py`
 - Create: `scripts/architecture_graph/resources/__init__.py`
@@ -112,7 +114,7 @@
 **Interfaces:**
 - Produces: `LifecycleLens`, `ProvenanceLayer`, `ExternalRecordRef`, `ClaimArgument`, `RelationCandidate`, `QualifiedRelation`, `IngestedCorpus`, and `RecordCatalog`.
 - Produces immutable result types for every later stage, including `ReviewedMaterializationResult` for accepted-successor cascades.
-- Produces: `build_derivation_record(...) -> Record`.
+- Produces: `canonical_utc_event_time(value: str) -> str` and `build_derivation_record(...) -> Record`; deterministic derivations require `created_at=None`, while `llm` and `human` derivations require the validated canonical UTC event form `YYYY-MM-DDTHH:MM:SSZ`.
 - Produces: `load_versioned_resource(name: str) -> Mapping[str, object]` and `resource_digest(name: str) -> str`.
 - Produces: `validate_typed_record(record, expected_kind=None) -> tuple[ValidationIssue, ...]`.
 - Produces: `validate_snapshot_references(records_by_type, external_resolver) -> tuple[ValidationIssue, ...]`.
@@ -220,6 +222,41 @@ def test_derivation_keeps_producer_method_and_time_independent() -> None:
     assert record["external_inputs"][0]["record_id"] == "decision:prior"
 
 
+@pytest.mark.parametrize("producer_kind", ["llm", "human"])
+def test_event_derivation_requires_canonical_utc_time(producer_kind: str) -> None:
+    common = {
+        "producer_kind": producer_kind,
+        "method": "proposal_generation" if producer_kind == "llm" else "review_correction",
+        "tool": "fixture",
+        "tool_version": "1.0.0",
+        "model": "fixture-model" if producer_kind == "llm" else None,
+        "model_version": "1.0.0" if producer_kind == "llm" else None,
+        "model_artifact_digest": "sha256:" + "1" * 64 if producer_kind == "llm" else None,
+        "configuration_digest": "sha256:" + "2" * 64,
+        "pipeline_digest": "sha256:" + "3" * 64,
+        "input_ids": ("claim:one",),
+        "output_kind": "proposal" if producer_kind == "llm" else "claim_successor",
+        "output_identity_key": "claim:one",
+    }
+    with pytest.raises(ValueError, match="canonical UTC event time"):
+        build_derivation_record(**common, created_at=None)
+    with pytest.raises(ValueError, match="canonical UTC event time"):
+        build_derivation_record(**common, created_at="2026-07-19T10:00:00+00:00")
+    record = build_derivation_record(
+        **common,
+        created_at="2026-07-19T10:00:00Z",
+    )
+    assert record["created_at"] == "2026-07-19T10:00:00Z"
+    invalid_payload = dict(record)
+    invalid_payload.pop("content_digest")
+    invalid_payload["created_at"] = "2026-07-19T10:00:00+00:00"
+    invalid = finalize_record(invalid_payload)
+    assert any(
+        issue.field == "created_at"
+        for issue in validate_typed_record(invalid, "derivation")
+    )
+
+
 def test_claim_schema_requires_every_qualified_claim_field() -> None:
     invalid = finalize_record({"id": "claim:one", "kind": "claim"})
     issues = validate_typed_record(invalid, "claim")
@@ -305,6 +342,31 @@ Expected: FAIL because the analysis types, typed schemas, and resources do not e
 
 - [ ] **Step 2: Add common enums, immutable values, result types, and derivations**
 
+First extend `scripts/architecture_graph/canonical.py` with the shared event-time validator used by builders, Phase 1 record validation, review append, and typed snapshot validation:
+
+```python
+from datetime import datetime
+
+
+_CANONICAL_UTC_EVENT_TIME = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def canonical_utc_event_time(value: str) -> str:
+    try:
+        parsed = datetime.strptime(value, _CANONICAL_UTC_EVENT_TIME)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "created_at must be a canonical UTC event time YYYY-MM-DDTHH:MM:SSZ"
+        ) from error
+    if parsed.strftime(_CANONICAL_UTC_EVENT_TIME) != value:
+        raise ValueError(
+            "created_at must be a canonical UTC event time YYYY-MM-DDTHH:MM:SSZ"
+        )
+    return value
+```
+
+In the Phase 1 `derivation` branch of `validate_record_shape`, retain the deterministic-null check and replace the non-deterministic string-only check with `canonical_utc_event_time(created_at)`. This is a strict extension of the repaired Phase 1 schema, not a second event-time implementation.
+
 Create `scripts/architecture_graph/analysis_types.py` with these core contracts:
 
 ```python
@@ -315,7 +377,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from collections.abc import Mapping, Sequence
 
-from architecture_graph.canonical import stable_id
+from architecture_graph.canonical import canonical_utc_event_time, stable_id
 from architecture_graph.records import JSONValue, Record, canonical_set, finalize_record
 
 
@@ -673,8 +735,15 @@ def build_derivation_record(
     created_at: str | None,
     external_inputs: tuple[ExternalRecordRef, ...] = (),
 ) -> Record:
-    if producer_kind == "deterministic" and created_at is not None:
-        raise ValueError("deterministic derivations cannot contain created_at")
+    if producer_kind == "deterministic":
+        if created_at is not None:
+            raise ValueError("deterministic derivations cannot contain created_at")
+    elif producer_kind in {"llm", "human"}:
+        if created_at is None:
+            raise ValueError("event derivation requires a canonical UTC event time")
+        created_at = canonical_utc_event_time(created_at)
+    else:
+        raise ValueError(f"unsupported producer kind: {producer_kind}")
     external_records = [item.as_record() for item in sorted(external_inputs)]
     derivation_id = stable_id(
         "derivation",
@@ -1173,7 +1242,7 @@ Typed proposal validation is exhaustive. `create_record` has null target/path an
 
 Lineage adds nullable `predecessor_snapshot_id` and `successor_snapshot_id`. A null snapshot locator requires a local endpoint; a non-null locator must resolve the exact stable ID and content digest through `external_resolver`. Derivation `external_inputs` use the same resolver. This is the only permitted cross-snapshot reference form. Validation reports every dangling/wrong-kind reference before publication.
 
-Use `importlib.resources.files("architecture_graph.resources")` to load one JSON object, reject any resource whose `schema_version` is not integer `1`, and hash its canonical bytes. `validate_typed_record` returns sorted `ValidationIssue(field, message)` values instead of raising so staging can report every missing field. When a derivation has `external_inputs`, validate each complete `{snapshot_id, kind, record_id, content_digest}` locator and its digest syntax; those locators intentionally resolve through an immutable parent snapshot rather than the current bundle's local-ID table.
+Use `importlib.resources.files("architecture_graph.resources")` to load one JSON object, reject any resource whose `schema_version` is not integer `1`, and hash its canonical bytes. `validate_typed_record` returns sorted `ValidationIssue(field, message)` values instead of raising so staging can report every missing field. Extend the Phase 1 derivation validator rather than replacing it: `producer_kind: deterministic` requires `created_at: null`, while `llm` and `human` require a non-null string accepted by the same `canonical_utc_event_time` helper used by `build_derivation_record`; offsets, fractional/noncanonical spellings, and invalid calendar values fail. When a derivation has `external_inputs`, validate each complete `{snapshot_id, kind, record_id, content_digest}` locator and its digest syntax; those locators intentionally resolve through an immutable parent snapshot rather than the current bundle's local-ID table.
 
 Create `terms-en-v1.json`:
 
@@ -1239,7 +1308,7 @@ Expected: focused and cumulative tests pass; compileall exits 0.
 - [ ] **Step 6: Commit the analysis contracts**
 
 ```bash
-git add pyproject.toml scripts/architecture_graph/analysis_types.py scripts/architecture_graph/schemas.py scripts/architecture_graph/resources tests/helpers/phase2_catalog.py tests/test_analysis_types.py
+git add pyproject.toml scripts/architecture_graph/canonical.py scripts/architecture_graph/records.py scripts/architecture_graph/analysis_types.py scripts/architecture_graph/schemas.py scripts/architecture_graph/resources tests/helpers/phase2_catalog.py tests/test_analysis_types.py
 git commit -m "feat: define deterministic analysis records"
 ```
 
@@ -1254,7 +1323,8 @@ git commit -m "feat: define deterministic analysis records"
 - Create: `tests/test_nlp.py`
 
 **Interfaces:**
-- Produces: `RuntimeWarningTemplate`, `NlpRuntime`, `ParsedSegment`, and `ParsedCorpus`; `ParsedCorpus` carries finalized warnings and their derivation.
+- Produces: `ModelArtifactLimits(max_paths=8192, max_files=4096, max_bytes=536870912)`, `RuntimeWarningTemplate`, `NlpRuntime`, `ParsedSegment`, and `ParsedCorpus`; `ParsedCorpus` carries finalized warnings, stable-sorted `derivations`, and an immutable `derivation_by_capability` map.
+- Produces: `hash_installed_model_artifact(package_root: Path, limits: ModelArtifactLimits = ModelArtifactLimits()) -> str`; it is the sole bounded artifact routine used by both status and index runtime loading.
 - Produces: `load_nlp_runtime(config: ProjectConfig) -> NlpRuntime`.
 - Produces: `parse_corpus(corpus, runtime, configuration_digest, pipeline_digest) -> ParsedCorpus`.
 
@@ -1263,12 +1333,19 @@ git commit -m "feat: define deterministic analysis records"
 Create `tests/test_nlp.py`:
 
 ```python
+import pytest
 import spacy
 
 from architecture_graph.analysis_types import IngestedCorpus
 from architecture_graph.config import ProjectConfig
-from architecture_graph.nlp import load_nlp_runtime, parse_corpus
+from architecture_graph.nlp import (
+    ModelArtifactLimits,
+    hash_installed_model_artifact,
+    load_nlp_runtime,
+    parse_corpus,
+)
 from architecture_graph.records import finalize_record
+from tests.helpers.nlp_docs import runtime_with_capabilities
 
 
 def test_missing_model_is_visible_and_never_downloaded(monkeypatch) -> None:
@@ -1300,11 +1377,66 @@ def test_parse_corpus_sorts_segments_and_labels_tokenizer_fallback(monkeypatch) 
     runtime = load_nlp_runtime(ProjectConfig(spacy_model="missing_en_model"))
     parsed = parse_corpus(corpus, runtime, "sha256:config", "sha256:pipeline")
     assert [item.segment_id for item in parsed.segments] == ["segment:a", "segment:z"]
-    assert parsed.derivation["method"] == "rule_tokenization"
-    assert parsed.derivation["model"] == "spacy-blank-en"
+    assert {item["method"] for item in parsed.derivations} == {"rule_tokenization"}
+    tokenization = parsed.derivation_by_capability["tokenization"]
+    assert tokenization["method"] == "rule_tokenization"
+    assert tokenization["model"] == "spacy-blank-en"
     assert parsed.warnings[0]["warning_scope"] == "global"
     assert parsed.warnings[0]["source_version_id"] is None
-    assert parsed.warnings[0]["derivation_ids"] == [parsed.derivation["id"]]
+    assert parsed.warnings[0]["derivation_ids"] == [tokenization["id"]]
+
+
+def test_statistical_capability_gets_its_own_accurate_derivation() -> None:
+    runtime = runtime_with_capabilities("tokenization", "named_entities")
+    source = finalize_record({"id": "source:one", "kind": "source"})
+    segment = finalize_record(
+        {"id": "segment:one", "kind": "segment", "source_version_id": "source:one", "text": "Checkout"}
+    )
+    parsed = parse_corpus(
+        IngestedCorpus.from_records([source], [segment], [], []),
+        runtime,
+        "sha256:config",
+        "sha256:pipeline",
+    )
+    assert parsed.derivation_by_capability["tokenization"]["method"] == (
+        "rule_tokenization"
+    )
+    assert parsed.derivation_by_capability["named_entities"]["method"] == (
+        "statistical_nlp"
+    )
+    assert len(parsed.derivations) == 2
+
+
+def test_model_artifact_hash_is_confined_regular_and_bounded(tmp_path) -> None:
+    package = tmp_path / "fixture_model"
+    package.mkdir()
+    (package / "config.cfg").write_bytes(b"model")
+    first = hash_installed_model_artifact(
+        package, ModelArtifactLimits(max_files=1, max_bytes=5)
+    )
+    assert first.startswith("sha256:")
+
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    (package / "escape.bin").symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        hash_installed_model_artifact(package)
+
+    (package / "escape.bin").unlink()
+    (package / "second.bin").write_bytes(b"x")
+    with pytest.raises(ValueError, match="path limit"):
+        hash_installed_model_artifact(
+            package,
+            ModelArtifactLimits(max_paths=1, max_files=10, max_bytes=100),
+        )
+    with pytest.raises(ValueError, match="file limit"):
+        hash_installed_model_artifact(
+            package, ModelArtifactLimits(max_files=1, max_bytes=100)
+        )
+    with pytest.raises(ValueError, match="byte limit"):
+        hash_installed_model_artifact(
+            package, ModelArtifactLimits(max_files=10, max_bytes=5)
+        )
 ```
 
 Run:
@@ -1335,19 +1467,20 @@ Expected: the lock records spaCy and scikit-learn; no language model is download
 
 - [ ] **Step 3: Implement runtime identity and parsed-corpus ordering**
 
-Create `scripts/architecture_graph/nlp.py` with frozen `RuntimeWarningTemplate`, `NlpRuntime`, `ParsedSegment`, and `ParsedCorpus`. `load_nlp_runtime` calls `spacy.load` only for a configured installed package, catches `OSError`, creates `spacy.blank("en")` plus `sentencizer`, and returns an inert `RuntimeWarningTemplate(code, message)` rather than a record. A configured null model selects the blank tokenizer without a missing-model warning. The runtime has no configuration/pipeline digests yet and therefore must not finalize a warning or invent provenance. It never imports or calls a downloader.
+Create `scripts/architecture_graph/nlp.py` with frozen `ModelArtifactLimits`, `RuntimeWarningTemplate`, `NlpRuntime`, `ParsedSegment`, and `ParsedCorpus`. `NlpRuntime` has exactly `nlp: Language`, `model_name: str`, `spacy_version: str`, `model_version: str | None`, `model_artifact_digest: str | None`, `capabilities: tuple[str, ...]`, and `warning_templates: tuple[RuntimeWarningTemplate, ...]`. `ParsedCorpus` has exactly `segments: tuple[ParsedSegment, ...]`, `warnings: tuple[Record, ...]`, `derivations: tuple[Record, ...]`, and `derivation_by_capability: Mapping[str, Record]`; freeze the mapping with `MappingProxyType`. `load_nlp_runtime` calls `spacy.load` only for a configured installed package, catches `OSError`, creates `spacy.blank("en")` plus `sentencizer`, and returns an inert `RuntimeWarningTemplate(code, message)` rather than a record. A configured null model selects the blank tokenizer without a missing-model warning. The runtime has no configuration/pipeline digests yet and therefore must not finalize a warning or invent provenance. It never imports or calls a downloader.
 
-Hash the installed model package by canonical relative path plus SHA-256 for every non-cache file under its import package. Record the observed spaCy distribution version, model metadata version, and artifact digest. Capabilities are stable sorted values from `tokenization`, `dependency_parse`, `noun_chunks`, and `named_entities`.
+`hash_installed_model_artifact` first resolves one existing package root, then performs an incremental directory walk without following symlinks. At each directory, consume `os.scandir` entries only until the remaining path budget plus one, reject `model artifact path limit exceeded` before materializing more, sort that bounded batch by NFC-normalized relative POSIX path, and continue. The total visited-entry cap is 8,192. Ignore only `__pycache__` directories and `.pyc`/`.pyo` files. Every other entry must remain beneath the resolved package root and be a regular file according to `lstat`; reject symlinks and special files visibly. Before reading a file, increment the file count and its `st_size`; fail with `model artifact file limit exceeded` above 4,096 files or `model artifact byte limit exceeded` above 536,870,912 bytes. Hash each admitted file by NFC-normalized POSIX relative path, a separator, its byte length, and SHA-256 content read in fixed one-MiB chunks. An over-limit or unsafe package fails runtime loading and freshness computation; it never falls back to an incomplete digest. `load_nlp_runtime`, deterministic index fingerprinting, and read-only `memory_status` call this one routine with the same default limits. Record the observed spaCy distribution version, model metadata version, and artifact digest. Capabilities are stable sorted values from `tokenization`, `dependency_parse`, `noun_chunks`, and `named_entities`; expose `noun_chunks` only together with `dependency_parse`.
 
-`parse_corpus` pipes segment text in stable ID order and creates one deterministic derivation. Its method is `dependency_parse` only when the parser capability exists; otherwise it is `rule_tokenization`. Its input IDs are all parsed segment IDs, falling back to sorted source IDs when the corpus has sources but no segments. For a fully empty corpus it returns no parsed segments, warning records, or derivation. Its model fields come from the observed runtime, and its configuration and pipeline digests are the supplied actual values. It then finalizes each runtime warning template as a `warning_scope: global` warning with null source/span, possible role `parser_runtime`, and the parser derivation ID. `ParsedCorpus.warnings` and `.derivation` are merged into the eventual snapshot exactly once.
+`parse_corpus` pipes segment text in stable ID order and creates capability-accurate deterministic derivations. `tokenization` maps to `rule_tokenization`; `dependency_parse` maps to `dependency_parse`; `noun_chunks` reuses the dependency-parse derivation that made the chunks possible; and `named_entities` maps to a separate `statistical_nlp` derivation. Each derivation uses all parsed segment IDs, falling back to sorted source IDs when the corpus has sources but no segments, and uses a distinct output kind/identity key so its stable ID cannot collide. `ParsedCorpus.derivation_by_capability` maps each available capability to its exact persisted derivation and `ParsedCorpus.derivations` is the stable-ID-sorted deduplicated tuple of those values. For a fully empty corpus it returns no parsed segments, warning records, derivations, or capability map. Derivation model fields come from the observed runtime, and configuration/pipeline digests are the supplied actual values. Finalize each runtime warning template as a `warning_scope: global` warning with null source/span, possible role `parser_runtime`, and the tokenization derivation ID. `ParsedCorpus.warnings` and all `.derivations` are merged into the eventual snapshot exactly once.
 
 Create `tests/helpers/nlp_docs.py`:
 
 ```python
+import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
 
-from architecture_graph.nlp import ParsedSegment
+from architecture_graph.nlp import NlpRuntime, ParsedSegment
 
 
 def parsed_segment(
@@ -1372,6 +1505,21 @@ def parsed_segment(
         sent_starts=sent_starts,
     )
     return ParsedSegment(segment_id, source_version_id, doc)
+
+
+def runtime_with_capabilities(*capabilities: str) -> NlpRuntime:
+    """Build the frozen no-download test runtime."""
+    nlp = spacy.blank("en")
+    nlp.add_pipe("sentencizer")
+    return NlpRuntime(
+        nlp=nlp,
+        model_name="fixture-en",
+        spacy_version=spacy.__version__,
+        model_version="1.0.0",
+        model_artifact_digest="sha256:" + "a" * 64,
+        capabilities=tuple(sorted(capabilities)),
+        warning_templates=(),
+    )
 ```
 
 - [ ] **Step 4: Run focused and cumulative tests**
@@ -1426,10 +1574,16 @@ def test_distinct_architecture_terms_keep_evidence_and_outscore_boilerplate(
     assert type(terms["orderplaced"]["vocabulary_index"]) is int
     assert terms["orderplaced"]["idf"] > 0
     assert {item["method"] for item in result.derivations} == {"rule", "tfidf"}
+    local_derivations = {record["id"] for record in result.derivations}
+    upstream_derivations = {record["id"] for record in term_corpus.parsed.derivations}
     assert all(
-        set(item["derivation_ids"]) <= {record["id"] for record in result.derivations}
+        set(item["derivation_ids"]) <= local_derivations | upstream_derivations
         for item in result.terms
     )
+    if "named_entities" in term_corpus.parsed.derivation_by_capability:
+        assert term_corpus.parsed.derivation_by_capability["named_entities"]["id"] in (
+            terms["orderplaced"]["derivation_ids"]
+        )
 
 
 def test_one_normalized_surface_gets_one_precedence_selected_lexical_kind(
@@ -1482,7 +1636,7 @@ Expected: FAIL because term discovery does not exist.
 
 - [ ] **Step 2: Implement candidates and TF-IDF without ranking nouns as decisions**
 
-Normalize NFC, collapse whitespace, and casefold. Collect heading phrases, glossary forms, noun chunks and named entities when capabilities exist, acronyms, identifiers, and one-to-three-token normalized n-grams. Collapse candidate classifications to exactly one lexical record per normalized form with this precedence: glossary, acronym, identifier, heading phrase, named entity, noun phrase, n-gram. A lower-precedence observation still contributes its surfaces and evidence to the selected record. Every candidate retains surface forms, source versions, segment IDs, and evidence IDs.
+Normalize NFC, collapse whitespace, and casefold. Collect heading phrases, glossary forms, noun chunks and named entities when capabilities exist, acronyms, identifiers, and one-to-three-token normalized n-grams. Collapse candidate classifications to exactly one lexical record per normalized form with this precedence: glossary, acronym, identifier, heading phrase, named entity, noun phrase, n-gram. A lower-precedence observation still contributes its surfaces and evidence to the selected record. Every candidate retains surface forms, source versions, segment IDs, evidence IDs, and the exact upstream capability derivation IDs that produced it. Named-entity observations cite `parsed.derivation_by_capability["named_entities"]`; noun chunks cite `dependency_parse`; token-derived acronym/identifier/n-gram observations cite `tokenization`; structural heading/glossary observations need only the term-stage rule derivation. `TermDiscoveryResult.derivations` returns the new rule and TF-IDF derivations; upstream parsed derivations remain in `ParsedCorpus.derivations` and are referenced, not copied or relabeled.
 
 Fit exactly one `TfidfVectorizer` over stable segment order after source-byte deduplication. Group sources by `source.content_hash`, choose the lexicographically lowest source ID as that byte group’s canonical representative, and fit only its segments. Do not deduplicate the persisted mentions or evidence: all source versions remain attached to the resulting term, while `independent_source_count` counts distinct content hashes.
 
@@ -1512,7 +1666,7 @@ vectorizer = TfidfVectorizer(
 )
 ```
 
-Each term identity hashes normalized form plus term kind. Store sorted surface forms; mention, segment, and independent-source counts; stable vocabulary index; exact fitted IDF; maximum and nonzero-mean TF-IDF; generic-hub flag; evidence IDs; term-normalizer resource digest; and the returned `rule` and `tfidf` derivation IDs. `build_term_index` exposes immutable maps by ID, `(normalized, term_kind)`, lexical normalized form, controlled-predicate normalized form, casefolded surface, and vocabulary index, plus the IDF vector and normalizer digest reconstructed entirely from `terms.jsonl`. One normalized spelling may exist once in the lexical map and once in the controlled-predicate map; it never overwrites either. Reject duplicate kind keys, duplicate coordinates, coordinate gaps, or inconsistent IDF values.
+Each term identity hashes normalized form plus term kind. Store sorted surface forms; mention, segment, and independent-source counts; stable vocabulary index; exact fitted IDF; maximum and nonzero-mean TF-IDF; generic-hub flag; evidence IDs; term-normalizer resource digest; the returned `rule` and `tfidf` derivation IDs; and every capability derivation that actually contributed an observation. Never attach a statistical capability derivation to a term observed only by structural rules. `build_term_index` exposes immutable maps by ID, `(normalized, term_kind)`, lexical normalized form, controlled-predicate normalized form, casefolded surface, and vocabulary index, plus the IDF vector and normalizer digest reconstructed entirely from `terms.jsonl`. One normalized spelling may exist once in the lexical map and once in the controlled-predicate map; it never overwrites either. Reject duplicate kind keys, duplicate coordinates, coordinate gaps, or inconsistent IDF values.
 
 - [ ] **Step 3: Run focused and cumulative tests**
 
@@ -1593,7 +1747,10 @@ def test_diagram_edge_is_typed_and_incomplete_tuple_is_only_a_warning(
     assert {
         item.id for item in result.claim_eligible_candidates
     } < {item.id for item in result.candidates}
-    persisted_derivations = {item["id"] for item in result.derivations}
+    persisted_derivations = {
+        item["id"]
+        for item in (*result.derivations, *relation_corpus.parsed.derivations)
+    }
     assert all(
         set(item.derivation_ids) <= persisted_derivations for item in result.candidates
     )
@@ -1618,9 +1775,9 @@ OBJECT_DEPS = frozenset({"dobj", "obj", "attr", "oprd", "dative"})
 COORD_DEPS = frozenset({"conj"})
 ```
 
-Apply rules in this order: typed diagram statement; passive predicate with passive subject and agent/by object; active predicate with subject and direct object; copular root; imperative root with object and heading context; coordinated subject/object Cartesian expansion. When only tokenizer capability exists, apply a versioned anchored regex fallback for explicit `<identifier or noun phrase> <modal?> <controlled verb phrase> <object>` and imperative `<controlled verb> <object>` forms. Mark fallback method `rule`, never `dependency_parse`.
+Apply rules in this order: typed diagram statement; passive predicate with passive subject and agent/by object; active predicate with subject and direct object; copular root; imperative root with object and heading context; coordinated subject/object Cartesian expansion. When only tokenizer capability exists, apply a versioned anchored regex fallback for explicit `<identifier or noun phrase> <modal?> <controlled verb phrase> <object>` and imperative `<controlled verb> <object>` forms. Mark the extraction-stage fallback derivation method `rule`, never `dependency_parse`.
 
-Persist every recognized candidate, including one with a missing subject or object, in `RelationCandidateResult.candidates`; attach `incomplete_relation` warnings to those incomplete records. Derive `claim_eligible_candidates` by retaining only complete subject-predicate-object tuples. Task 5 consumes that filtered tuple, while reports and diagnostics can still inspect the incomplete candidates and their evidence.
+Persist every recognized candidate, including one with a missing subject or object, in `RelationCandidateResult.candidates`; attach `incomplete_relation` warnings to those incomplete records. Derive `claim_eligible_candidates` by retaining only complete subject-predicate-object tuples. Task 5 consumes that filtered tuple, while reports and diagnostics can still inspect the incomplete candidates and their evidence. Every prose candidate cites both its extraction-stage derivation and the exact upstream `tokenization` or `dependency_parse` derivation it consumed; typed diagram candidates do not invent an NLP dependency.
 
 Phrase text comes from token subtrees in token order. Candidate identity hashes segment ID, normalized sentence span, subject, predicate, object, syntax, and rule version. Confidence is 0.95 for typed diagram edges, 0.90 for active/passive dependency forms, 0.85 for copular forms, 0.75 for imperative context, and 0.70 for tokenizer-only fallback. Store heading path, section role, ADR ID/status, syntax, evidence, and actual stage derivation IDs. Sort candidates by stable ID.
 
@@ -1754,7 +1911,7 @@ git commit -m "feat: qualify architecture relations"
 **Interfaces:**
 - Produces: `load_predicate_ontology(path=None) -> PredicateOntology` and `normalize_predicate(surface, ontology) -> Mapping[str, str] | None`.
 - Produces: `classify_entity(argument, relation, rules) -> tuple[str, Mapping[str, tuple[str, ...]]]` and `alias_similarity(left, right, rules) -> float`.
-- Produces: `resolve_entities(relations, terms, declared_aliases, configuration_digest, pipeline_digest) -> EntityResolutionResult`.
+- Produces: `resolve_entities(relations, corpus: IngestedCorpus, terms, declared_aliases, configuration_digest, pipeline_digest) -> EntityResolutionResult`; corpus is the explicit immutable source/segment/evidence context for source-local resolution and provenance.
 - Produces: `materialize_claims(relations, resolution, corpus, ontology, configuration_digest, pipeline_digest) -> ClaimMaterializationResult`.
 - Produces: `argument_identity_payload`, `claim_identity_payload`, `claim_stable_id`, and `validate_claim`.
 
@@ -1779,6 +1936,7 @@ def test_alias_and_unambiguous_acronym_resolve_but_similarity_does_not_merge(
 ) -> None:
     result = resolve_entities(
         claim_fixture.relations,
+        claim_fixture.corpus,
         claim_fixture.terms,
         {"checkout-api": "Checkout Service"},
         "sha256:config",
@@ -1802,6 +1960,7 @@ def test_declared_alias_with_multiple_scoped_targets_stays_unresolved(
 ) -> None:
     result = resolve_entities(
         claim_fixture.relations_with_ambiguous_checkout_targets(),
+        claim_fixture.corpus,
         claim_fixture.terms,
         {"checkout-api": "checkout-service"},
         "sha256:config",
@@ -1834,6 +1993,7 @@ def test_imperative_context_resolves_only_to_one_nearest_explicit_system(
 ) -> None:
     resolved = resolve_entities(
         claim_fixture.imperative_relations_under_unique_component,
+        claim_fixture.corpus,
         claim_fixture.terms,
         {},
         "sha256:config",
@@ -1846,6 +2006,7 @@ def test_imperative_context_resolves_only_to_one_nearest_explicit_system(
 
     ambiguous = resolve_entities(
         claim_fixture.imperative_relations_under_tied_components,
+        claim_fixture.corpus,
         claim_fixture.terms,
         {},
         "sha256:config",
@@ -1954,7 +2115,7 @@ Expected: FAIL because predicate normalization, entity resolution, and claims do
 
 - [ ] **Step 2: Implement collision-free predicate lookup and conservative arguments**
 
-Invert the predicate resource and reject a surface assigned to two canonical predicates. Resolve argument forms in two passes. First materialize explicit/literal arguments and entities. Then resolve an imperative subject by: the nearest explicit allowed entity in the same heading segment; the nearest ancestor heading whose normalized text resolves uniquely in compatible scope; then the unique allowed component/service/shared-infrastructure entity in that logical source and compatible scope. Distance is source-span/heading depth, with stable ID used only for deterministic ordering, never to break a semantic tie. Zero or tied nearest candidates retain an `unresolved_span` and emit evidence-backed `unresolved_implicit_context`; a unique result becomes `implicit_context` with that persisted entity ID. Continue with configured alias; exact normalized identifier; unique acronym; distinct new entity. `declared_aliases` comes only from the validated, digest-covered Phase 1 `ProjectConfig.aliases` map. An alias target must resolve to exactly one existing canonical identifier under the relation's scope; zero or multiple matches retain an `unresolved_span` and emit `unresolved_alias_target` or `ambiguous_alias_target` rather than choosing. Apply the exact entity type, declared-scope, character-trigram Jaccard, 0.72 threshold, and same-type/same-scope gates from `entity-rules-v1.json`. A qualifying similarity emits an `ALIAS_CANDIDATE` edge with evidence and a persisted graph-rule derivation but never changes identity; a type or scope mismatch emits no alias edge.
+Invert the predicate resource and reject a surface assigned to two canonical predicates. At function entry build immutable maps from the supplied `IngestedCorpus`: source by source-version ID, segment by segment ID, evidence by evidence ID, and source-local segments ordered by exact source span then stable ID. Reject a relation whose segment/source/evidence IDs do not resolve through those maps. Resolve argument forms in two passes. First materialize explicit/literal arguments and entities. Then resolve an imperative subject by: the nearest explicit allowed entity in the same heading segment; the nearest ancestor heading whose normalized text resolves uniquely in compatible scope; then the unique allowed component/service/shared-infrastructure entity in that Phase 1 `logical_source_id` and compatible scope. Compute distance only from the resolved segment heading ancestry and evidence/source spans in the corpus, never from ad hoc candidate metadata. Stable ID provides deterministic ordering but never breaks a semantic tie. Zero or tied nearest candidates retain an `unresolved_span` and emit evidence-backed `unresolved_implicit_context`; a unique result becomes `implicit_context` with that persisted entity ID. Continue with configured alias; exact normalized identifier; unique acronym; distinct new entity. `declared_aliases` comes only from the validated, digest-covered Phase 1 `ProjectConfig.aliases` map. An alias target must resolve to exactly one existing canonical identifier under the relation's scope; zero or multiple matches retain an `unresolved_span` and emit `unresolved_alias_target` or `ambiguous_alias_target` rather than choosing. Apply the exact entity type, declared-scope, character-trigram Jaccard, 0.72 threshold, and same-type/same-scope gates from `entity-rules-v1.json`. A qualifying similarity emits an `ALIAS_CANDIDATE` edge with evidence and a persisted graph-rule derivation but never changes identity; a type or scope mismatch emits no alias edge.
 
 Entity identity hashes entity type, normalized canonical key, and canonical declared scope. Store sorted surface forms, evidence, derivations, and field origins. An unresolved phrase becomes a valid `unresolved_span` argument and remains visible in the canonical claim ledger; only a missing object prevents claim materialization and emits a warning. Task 12 excludes unresolved arguments from semantic centrality without erasing them from evidence review.
 
@@ -2365,7 +2526,7 @@ git commit -m "feat: identify architecture review risks"
 
 - [ ] **Step 1: Add raw proposal/review events and failing projection tests**
 
-`raw-proposals.jsonl` contains: same-identity modality replacement at `/qualifiers/modality`; identity-changing subject replacement at `/subject/entity_id`; and unreviewed alias proposal. `raw-reviews.jsonl` contains: stale verification; lower-authority verify plus higher-authority dispute; equal-authority incompatible verdicts; accepted modality proposal; accepted subject proposal; rejected alias proposal; and explicit same-reviewer supersession. Test helpers parse every raw line and call `finalize_record`; hand-calculated digests do not enter fixtures.
+`raw-proposals.jsonl` contains: same-identity modality replacement at `/qualifiers/modality`; identity-changing subject replacement at `/subject/entity_id`; and unreviewed alias proposal. Each proposal points to a finalized `producer_kind: llm` derivation built with fixed `created_at: 2026-07-19T10:00:00Z`; a fixture variant with null or offset-form time must fail typed validation. `raw-reviews.jsonl` contains: stale verification; lower-authority verify plus higher-authority dispute; equal-authority incompatible verdicts; accepted modality proposal; accepted subject proposal; rejected alias proposal; and explicit same-reviewer supersession. Every human review uses a fixed canonical `YYYY-MM-DDTHH:MM:SSZ` time. Test helpers parse every raw line and call `finalize_record`; hand-calculated digests do not enter fixtures.
 
 Create `tests/test_review_projection.py`:
 
@@ -2858,7 +3019,6 @@ git commit -m "feat: score intrinsic decision importance"
 - Create: `scripts/architecture_graph/report.py`
 - Create: `scripts/architecture_graph/analysis.py`
 - Modify: `scripts/architecture_graph/fingerprint.py`
-- Modify: `scripts/architecture_graph/sources.py`
 - Modify: `scripts/architecture_graph/records.py`
 - Modify: `scripts/architecture_graph/indexer.py`
 - Modify: `scripts/architecture_graph/snapshot.py`
@@ -2875,13 +3035,13 @@ git commit -m "feat: score intrinsic decision importance"
 
 **Interfaces:**
 - Produces: `RenderedReport(markdown, cited_claim_ids, cited_evidence_ids, derivation_ids)`.
-- Produces: `render_engineer_report(selection, rankings, overspecification, config) -> RenderedReport`.
+- Produces: `render_engineer_report(selections: Mapping[LifecycleLens, ProjectionSelection], rankings, overspecification, config) -> RenderedReport`; current and review selections are required and each report section uses the exact lens mapping declared in Step 2.
 - Produces: `AnalysisResult(provenance_layer, records_by_type, report)` and `snapshot_records()`; one result contains one content version per stable ID for one provenance layer.
 - Produces interim `analyze_corpus_intrinsic(...) -> AnalysisResult` for the deterministic layer.
 - Produces: `FrozenReviewSet(records, canonical_bytes, digest)`, where records are fully validated/stable-ID-sorted and the digest hashes the exact canonical bytes.
 - Produces: `analyze_reviewed_catalog(parent_reader, frozen_review_set, ...) -> AnalysisResult` and `finalize_reviewed_snapshot(...) -> ReviewFinalizeResult` without modifying the parent snapshot; proposals come only from the immutable parent's `proposals.jsonl`. `ReviewFinalizeResult(snapshot_id, observation_id: str | None, reused)` is separate from Phase 1 `PublishedSnapshot`; only an unchanged reviewed no-op has null observation ID.
 - Produces: `append_review(project, request, config) -> ReviewAppendResult`; `ReviewAppendRequest` carries an optional immutable `parent_snapshot_id` selector plus the bounded target/replacement/evidence payload and never supplies its own authority value. The function resolves and opens the explicit selector or current snapshot only after acquiring the project lock; callers cannot pass a pre-opened reader.
-- Produces: `source_revision_digest(inputs) -> str`, the digest of the sorted unique selected content hashes and nothing else.
+- Consumes: repaired Phase 1 `canonical.source_revision_digest(content_hashes: Iterable[str]) -> str`; callers pass selected `SourceInput.content_hash` values and Phase 2 introduces no second function with this name.
 - Adds public CLI commands `architecture-graph review append ...` and `architecture-graph review finalize ...`.
 
 - [ ] **Step 1: Write failing fixed-section and vertical-slice tests**
@@ -2889,9 +3049,12 @@ git commit -m "feat: score intrinsic decision importance"
 Create `tests/test_report.py`:
 
 ```python
+from architecture_graph.analysis_types import LifecycleLens
+
+
 def test_report_has_four_fixed_sections_and_auditable_items(report_fixture) -> None:
     rendered = render_engineer_report(
-        report_fixture.selection,
+        report_fixture.selections,
         report_fixture.rankings,
         report_fixture.overspecification,
         ReportConfig(),
@@ -2911,16 +3074,18 @@ def test_report_has_four_fixed_sections_and_auditable_items(report_fixture) -> N
 
 
 def test_report_labels_stale_review_without_applying_it(report_fixture) -> None:
-    selection = report_fixture.selection_with_stale_review
+    selections = report_fixture.selections_with_stale_review
     rendered = render_engineer_report(
-        selection,
+        selections,
         report_fixture.rankings,
         report_fixture.overspecification,
         ReportConfig(),
     )
     assert "review:stale-modality" in rendered.markdown
     assert "stale; not applied" in rendered.markdown
-    assert selection.effective_status_by_target[("claim", "claim:modality")] == (
+    assert selections[LifecycleLens.REVIEW].effective_status_by_target[
+        ("claim", "claim:modality")
+    ] == (
         "unreviewed"
     )
 ```
@@ -2941,9 +3106,9 @@ Assert every stored claim attached by the reducer has nonempty `decision_ids` an
 
 Also parameterize a valid analysis bundle with: a claim missing `segment_id`; a dangling or wrong-kind field-origin ID; a dangling proposal derivation; a review superseding a missing review; a decision with an unresolved external predecessor locator; a lineage predecessor with neither local nor external locator; a decision-analysis or decision-diagnostic warning naming a missing decision; a ranking input missing from the bundle; an edge with a missing endpoint; and an edge whose resolved endpoint kind violates `EDGE_ENDPOINT_KINDS`. `SnapshotFinalizer.validate()` must reject each mutation before staging or pointer changes. Publish one global model warning, one `decision_analysis` ambiguous-status warning, and one decision-diagnostic warning to prove all discriminated envelopes pass. Build a four-revision deterministic chain and prove an external history reference to the oldest reachable ancestor validates, while a locator to an unrelated snapshot fails.
 
-Add source-revision tests over real `SourceInput` values. Pipeline, parser-model, scoring, alias, source-kind/role/authority, path, and report-only configuration changes keep `source_revision_digest` unchanged while changing `material_input_digest`. Adding a second selected path with byte-identical content at any authority also keeps the source-revision digest unchanged. When the bytes carry an explicit document ID, Phase 1 must accept the identical duplicate and assign both versions the same logical-source ID; reusing that explicit ID on different bytes must fail before publication. Adding, removing, or changing a unique byte group changes the revision digest. Deterministic manifests persist the exact digest; reviewed/enriched manifests inherit it from their immutable deterministic base. A query for `--provenance-layer deterministic` while current itself is deterministic opens current successfully rather than trying to dereference its null base field.
+Add source-revision tests over real `SourceInput` values while consuming the repaired Phase 1 helper. Assert both `revision_digest == source_revision_digest(item.content_hash for item in inputs)` and `revision_digest == sha256_digest(canonical_bytes(sorted({item.content_hash for item in inputs})))`; no object wrapper or Phase 2 helper is permitted. Pipeline, parser-model, scoring, alias, source-kind/role/authority, path, and report-only configuration changes keep that digest unchanged while changing `material_input_digest`. Adding a second selected path with byte-identical content at any authority also keeps the source-revision digest unchanged. When the bytes carry an explicit document ID, Phase 1 must accept the identical duplicate and assign both versions the same logical-source ID; reusing that explicit ID on different bytes must fail before publication. Adding, removing, or changing a unique byte group changes the revision digest. Deterministic manifests persist the exact digest; reviewed/enriched manifests inherit it from their immutable deterministic base. A query for `--provenance-layer deterministic` while current itself is deterministic opens current successfully rather than trying to dereference its null base field.
 
-Update every Phase 1 regression fixture affected by the now-required field. Valid observation records in `tests/test_jsonl_store.py` include a syntactically valid `source_revision_digest`, and their malformed variants still isolate only the intended error. The ambiguous-rename `input_digest` expectation in `tests/test_phase1_cli.py` adds `"source_revision_digest": reader.manifest["source_revision_digest"]` while retaining the exact canonical `rename_resolution` payload. Add an empty-resolution expectation too, so the Phase 2 extension cannot accidentally drop the Phase 1 rename input.
+Phase 1 already requires and validates `source_revision_digest` in manifests, observations, and deterministic input identity. Preserve those fixtures and the canonical helper unchanged. Add only Phase 2 layered-inheritance/wrong-digest regressions plus exact empty, unique, and ambiguous rename preimage expectations, so extending the pipeline cannot drop or reshape Phase 1's existing `source_revision_digest` or `rename_resolution` inputs.
 
 Add a real end-to-end duplicate-copy regression in `tests/test_analysis_pipeline.py`. Index a corpus containing one explicit-ID ADR, then add a second selected path with exactly the same bytes and an authority no lower than the original. The material snapshot changes and gains source/segment/evidence locations, but its source-revision digest stays fixed. Assert the set of claim IDs, every `claim_identity_payload`, decision semantic digests/statuses, semantic edge weights, feature vectors, scores, and rank order are unchanged; the affected claim canonical-unions both source-version/evidence/derivation sets instead of creating another ordinal. This exercises ingestion through final ranking and prevents a unit-only coalescing rule from drifting.
 
@@ -2957,35 +3122,35 @@ Expected: FAIL because report rendering and analysis orchestration do not exist.
 
 - [ ] **Step 2: Implement content-only engineer report rendering**
 
-Use the four exact headings above. Within each section sort by the relevant stored score descending and decision ID. Each item renders, in order: Decision; Status and scope; Why it ranks; Consequence; Evidence; Derivation; Confidence; Architect question. Empty sections contain `- None.`.
+Use the four exact headings above and require `selections` to contain both `LifecycleLens.CURRENT` and `LifecycleLens.REVIEW` for the snapshot's one provenance layer. Section one selects only from CURRENT and sorts by its stored criticality rank. Section two selects consequence/risk-bearing CURRENT decisions and also sorts by current criticality. Sections three and four select only from REVIEW and sort by stored review-priority rank; their displayed confidence is the review-lens confidence for the same decision. Historical rankings are persisted for bounded historical queries but never substituted into the report. Reject missing selections, mixed provenance layers, or a ranking whose lens/layer does not match its section. Within each section use decision ID as the final tie-breaker. Each item renders, in order: Decision; Status and scope; Why it ranks; Consequence; Evidence; Derivation; Confidence; Architect question. Empty sections contain `- None.`.
 
-Only accepted current decisions enter section one. Section two requires a documented consequence/risk edge. Section three contains conflict, absent/proposed/deprecated/disputed/changing material plus explicit stale/invalid review annotations. `ProjectionSelection` carries immutable `stale_review_ids`, `invalid_review_ids`, and `disputed_targets` from `ReviewProjection`; the renderer never tries to infer these states from raw review records. A stale/invalid review is named and labeled not applied and cannot change effective status. Section four contains over-specification result flagged or unknown; unknown is labeled unassessed. Criticality, review priority, and confidence remain separate.
+Only accepted current decisions enter section one. Section two requires a documented consequence/risk edge in the current selection. Section three contains conflict, absent/proposed/deprecated/disputed/changing review material plus explicit stale/invalid review annotations. `ProjectionSelection` carries immutable `stale_review_ids`, `invalid_review_ids`, and `disputed_targets` from `ReviewProjection`; the renderer never tries to infer these states from raw review records. A stale/invalid review is named and labeled not applied and cannot change effective status. Section four contains review-selection over-specification result flagged or unknown; unknown is labeled unassessed. Criticality, review priority, and confidence remain separate.
 
 Every source-facing statement names claim and evidence IDs. Every score/conflict/omission/derivation statement names input and derivation IDs. Persist no snapshot ID, branch, commit, observation, publication time, or current-pointer state.
 
 - [ ] **Step 3: Implement intrinsic orchestration and one publication path**
 
-`analyze_corpus_intrinsic` accepts the validated `ProjectConfig` and calls in order: parse; terms; relation candidates; qualification of `claim_eligible_candidates`; entity resolution with `project_config.aliases`; claims; deterministic decisions; deterministic diagnostics; deterministic lifecycle projections; intrinsic features/retrieval; rankings; report. Immediately after decision reduction it computes `final_claims = tuple(updated_claims_by_id.get(claim["id"], claim) for claim in original_claims)`, appends only explicitly new IDs, and asserts one content version per stable ID before building the deterministic catalog. It returns all fourteen record types for the deterministic layer, using canonical empty proposal/review files. Deduplicate derivations/edges by stable ID and reject same-ID/different-digest collisions.
+`analyze_corpus_intrinsic` accepts the validated `ProjectConfig` and calls in order: parse; terms; relation candidates; qualification of `claim_eligible_candidates`; entity resolution with the exact immutable `IngestedCorpus` plus `project_config.aliases`; claims; deterministic decisions; deterministic diagnostics; current/review/historical deterministic lifecycle projections; intrinsic features/retrieval; rankings; report from the required current/review selection map. Immediately after decision reduction it computes `final_claims = tuple(updated_claims_by_id.get(claim["id"], claim) for claim in original_claims)`, appends only explicitly new IDs, and asserts one content version per stable ID before building the deterministic catalog. It returns all fourteen record types for the deterministic layer, using canonical empty proposal/review files. Merge every `ParsedCorpus.derivations` record exactly once before resolving term/relation upstream provenance; deduplicate derivations/edges by stable ID and reject same-ID/different-digest collisions.
 
 `analyze_reviewed_catalog` starts from one immutable deterministic, enriched, or reviewed parent reader and the validated, stable-ID-sorted review records parsed from one locked ledger image. It receives their exact canonical snapshot bytes/digest as identity inputs; it never treats the external append order as semantic. It loads proposals only from that parent's verified `proposals.jsonl`, so the parent's content digest covers every proposal byte; callers cannot inject a second proposal set. For a reviewed parent, scan its field origins, predecessor locators, and lineage to identify review/proposal events already materialized in that self-contained catalog. Preserve those successors exactly once, reduce the complete ledger for status/reporting, and apply only newly effective corrections/proposals that target an exact record version in the selected parent. An event targeting a displaced predecessor is stale and cannot undo/reapply an accepted successor; a follow-up must target the current successor digest. It then substitutes changed entity IDs through claims, reruns decision reduction and diagnostics, and runs the same projection/ranking/report tail over only the fully cascaded reviewed catalog. It copies unchanged parent records needed for a self-contained bundle, replaces same-ID successors, adds new identities and lineage, and never copies a replaced content version. The result's rankings all use `provenance_layer: reviewed`.
 
 `finalize_reviewed_snapshot` publishes that result through the same validated writer with `snapshot_kind: reviewed`, `parent_snapshot_id` set to the immutable selected parent (including a reviewed parent), `base_deterministic_snapshot_id` inherited from the parent or set to the deterministic parent itself, no deterministic `analysis_parent_snapshot_id`, the deterministic base's `source_revision_digest`, the parent's material/deterministic pipeline digests, the review-pipeline digest, `review_authority_policy_digest`, and a reviewed input digest covering the parent (including its proposal ledger and already materialized successor state), base, canonical frozen review bytes, authority policy, and review pipeline. Ordering is strict under the project lock: resolve the selected parent/base; compute the current deterministic fingerprint from the parent's recorded runtime/model configuration and require exact equality with its inherited digest; compute the review fingerprint/policy input; only then read one review-ledger byte image, fully validate it, stable-ID-sort it, serialize it with the shared canonical writer, and hash those canonical bytes. A deterministic mismatch therefore fails before ledger read, analysis, staging, observation, or pointer work and cannot be bypassed by no-op reuse. After the verified frozen read, if the selected parent is reviewed and its frozen review-set digest, review-authority-policy digest, inherited deterministic digest, current review-pipeline digest, proposal digest, and set of already materialized review IDs exactly match current inputs, return `ReviewFinalizeResult(parent_id, None, True)` without an observation, staging, or pointer write. Otherwise analyze and publish, returning the normal non-null observation in `ReviewFinalizeResult`. A deterministic snapshot never contains reviewed successors. Phase 2 has no live enrichment command; if a future enriched parent exists, the same reviewed finalizer may consume it. Public read commands resolve a requested provenance layer to a concrete immutable snapshot: when the selected snapshot is deterministic, deterministic opens that snapshot itself; only an enriched/reviewed selection dereferences its non-null `base_deterministic_snapshot_id`. Reviewed requires a selected reviewed snapshot, and enriched requires a reachable enriched parent. Missing layers return an error instead of falling back.
 
-`review_commands.append_review` accepts no reader. It acquires the outer project lock, then resolves `request.parent_snapshot_id` or reads current state and opens that immutable target while still holding the lock. It holds the lock across every preflight and `AtomicJsonlLedger.append` (whose Phase 1 contract requires the caller to own that lock). It requires the caller's exact target kind/ID/content digest to resolve there and every supplied evidence ID to resolve there with kind `evidence`. It loads the configured authority policy and looks up `reviewer_id`; no CLI flag can set authority. It validates the verdict/field/replacement shape, caps canonical replacement JSON at 65,536 characters and evidence IDs at 20, stamps and canonicalizes an RFC 3339 UTC human event time, computes the replacement-value digest, and sets the review ID by hashing reviewer ID, exact target locator, field path, verdict, replacement digest, sorted evidence IDs, authority-policy digest, superseded review ID, and event time. Under the same lock it parses and fully validates the existing homogeneous ledger. A non-null superseded ID must resolve there, belong to the same reviewer, use the same target kind/stable ID and field path (the content digest may be an earlier same-ID version), and leave the complete supersession graph acyclic. Exact duplicate events deduplicate; distinct event times or valid supersession links produce distinct IDs. Only after all checks does it finalize the review record and perform crash-safe replacement. `review finalize` selects an explicit `--parent` or current snapshot and invokes the lock-aware reviewed finalizer. Expected validation/state errors map to exit 2 without changing ledger bytes, staging, observation, or pointer state.
+`review_commands.append_review` accepts no reader. It acquires the outer project lock, then resolves `request.parent_snapshot_id` or reads current state and opens that immutable target while still holding the lock. It holds the lock across every preflight and `AtomicJsonlLedger.append` (whose Phase 1 contract requires the caller to own that lock). It requires the caller's exact target kind/ID/content digest to resolve there and every supplied evidence ID to resolve there with kind `evidence`. It loads the configured authority policy and looks up `reviewer_id`; no CLI flag can set authority. It validates the verdict/field/replacement shape, caps canonical replacement JSON at 65,536 characters and evidence IDs at 20, stamps an exact UTC `YYYY-MM-DDTHH:MM:SSZ` human event time, and validates it with `canonical_utc_event_time` before computing the replacement-value digest. Offset, fractional, missing, or invalid calendar spellings fail before ledger mutation. It sets the review ID by hashing reviewer ID, exact target locator, field path, verdict, replacement digest, sorted evidence IDs, authority-policy digest, superseded review ID, and event time. Under the same lock it parses and fully validates the existing homogeneous ledger. A non-null superseded ID must resolve there, belong to the same reviewer, use the same target kind/stable ID and field path (the content digest may be an earlier same-ID version), and leave the complete supersession graph acyclic. Exact duplicate events deduplicate; distinct event times or valid supersession links produce distinct IDs. Only after all checks does it finalize the review record and perform crash-safe replacement. `review finalize` selects an explicit `--parent` or current snapshot and invokes the lock-aware reviewed finalizer. Expected validation/state errors map to exit 2 without changing ledger bytes, staging, observation, or pointer state.
 
 The reviewed finalizer uses the same project lock as `AtomicJsonlLedger`. While holding it, it reads and validates one byte image of `reviews/reviews.jsonl`, canonical-sorts the parsed records, computes `frozen_review_set_digest` from the exact bytes destined for snapshot `reviews.jsonl`, builds and validates the reviewed staging bundle, publishes it, appends its observation, and updates `current.json`. Expose a lock-aware internal publisher to avoid nested acquisition. A concurrent review append therefore runs either before the frozen read and enters the snapshot, or after the current-pointer update and remains pending for the next reviewed snapshot. Add a concurrency test that blocks finalization at the frozen read, attempts an append, and proves the append cannot commit between canonical frozen-digest computation and publication.
 
-Extend `SnapshotBundle`, `SnapshotWriter.create`, manifest-core validation, and manifest serialization with required `source_revision_digest` plus nullable digest/preimage pairs `enrichment_pipeline_digest`/`enrichment_pipeline_fingerprint` and `review_pipeline_digest`/`review_pipeline_fingerprint`, plus nullable `review_authority_policy_digest`. The existing Phase 1 `pipeline_fingerprint` remains the exact deterministic preimage and every layer inherits it unchanged. Deterministic bundles compute the source revision and set all enrichment/review fields null. Every layered bundle must equal the source-revision digest and deterministic fingerprint/digest of its declared deterministic base. Reviewed bundles require a review digest, a canonical review fingerprint whose hash equals that digest, and an authority-policy digest; they inherit the enrichment digest/preimage pair only when their declared ancestry contains an enriched parent, and otherwise require both null. An enriched bundle follows the symmetric rule for its enrichment pair. Keep these fields inside manifest and snapshot identity; do not place them on individual records.
+Extend `SnapshotBundle`, `SnapshotWriter.create`, manifest-core validation, and manifest serialization only with nullable digest/preimage pairs `enrichment_pipeline_digest`/`enrichment_pipeline_fingerprint` and `review_pipeline_digest`/`review_pipeline_fingerprint`, plus nullable `review_authority_policy_digest`. Preserve Phase 1's existing required `source_revision_digest` field and independent validation unchanged. The existing Phase 1 `pipeline_fingerprint` remains the exact deterministic preimage and every layer inherits it unchanged. Deterministic bundles compute the source revision through `canonical.source_revision_digest` and set all enrichment/review fields null. Every layered bundle must equal the source-revision digest and deterministic fingerprint/digest of its declared deterministic base. Reviewed bundles require a review digest, a canonical review fingerprint whose hash equals that digest, and an authority-policy digest; they inherit the enrichment digest/preimage pair only when their declared ancestry contains an enriched parent, and otherwise require both null. An enriched bundle follows the symmetric rule for its enrichment pair. Keep these fields inside manifest and snapshot identity; do not place them on individual records.
 
-Extend the Phase 1 observation required-field/schema validator and both new/reused observation constructors with `source_revision_digest`. It must equal the selected snapshot manifest's value. Validate digest syntax in observations and manifests, and add round-trip/wrong-digest tests; no observation or layered finalizer may synthesize a different revision key.
+Reuse the Phase 1 observation required-field/schema validator and its new/reused observation constructors without redefining `source_revision_digest`. Layered publication copies that value from the verified deterministic base and requires it to equal the selected snapshot manifest's value. Add layered round-trip and mismatch tests; no observation or layered finalizer may synthesize a different revision key.
 
 Add `review_pipeline_fingerprint(parent_deterministic_digest)` beside `pipeline_fingerprint`. Its canonical stage manifest names and hashes `schemas.py` review variants, `reviews.py`, `projections.py`, reviewed orchestration in `analysis.py`, reviewed publication in `indexer.py`/`snapshot.py`, and reviewed report code/templates; it also includes the parent deterministic digest, Python runtime, and exact output-affecting dependency versions. Development checkouts hash those files/resources; packaged builds hash the installed artifact plus the same stage manifest. Persist this exact canonical preimage as `review_pipeline_fingerprint` and validate its hash before reuse or publication, just as Phase 1 validates `pipeline_fingerprint`. Authority values and canonical frozen review bytes belong to reviewed input identity, not pipeline identity.
 
 Wire Phase 2 validation into the shared publication path: `_deduplicate` invokes `validate_typed_record` for every known Phase 2 kind and aggregates all issues; `SnapshotFinalizer.validate` then invokes `validate_snapshot_references`. The external resolver starts only from the bundle's declared parent, base, and analysis-parent locators, opens and verifies each immutable manifest/payload, and may follow their declared parent/base/analysis-parent links recursively. It rejects a snapshot locator outside that verified ancestry. This permits multi-revision history without accepting arbitrary project snapshots. No `write_stage`, reuse, or pointer update runs after a typed/reference error.
 
-Add `source_revision_digest` beside `material_input_digest` in `sources.py`. Its canonical payload is exactly `{"source_content_hashes": sorted(set(item.content_hash for item in inputs))}`. Exclude paths, multiplicity, source kind/role/authority, tracking metadata, pipeline/model/runtime identity, scoring, ontology, aliases, and report configuration. Any byte-identical copy therefore leaves the revision key unchanged regardless of its path-derived metadata. Authority aggregation remains the separate conservative content-group rule used by reducers/scorers.
+Do not add or shadow `source_revision_digest` in `sources.py`. Compute it only with `canonical.source_revision_digest(item.content_hash for item in inputs)`. Its sole preimage remains Phase 1's canonical array `sorted(set(content_hashes))`; never wrap that array in a Phase 2 object. Paths, multiplicity, source kind/role/authority, tracking metadata, pipeline/model/runtime identity, scoring, ontology, aliases, and report configuration remain excluded by the existing helper. Any byte-identical copy therefore leaves the revision key unchanged regardless of path-derived metadata. Authority aggregation remains the separate conservative content-group rule used by reducers/scorers.
 
-Change `pipeline_fingerprint` to accept the already loaded `NlpRuntime` identity and cover every Phase 2 Python module/resource, installed spaCy/scikit-learn version, configured model artifact digest, and report code. Index order is exact: load config and discover sources; compute the byte-deduplicated source revision; load the installed/no-download runtime; fingerprint code, dependency versions, and that runtime artifact; compute material digest; perform unchanged observation-only reuse; then parse/analyze only when material changed. Persist both digests and include both in deterministic input identity. The deterministic `input_digest` canonical payload is exactly `material_input_digest`, `source_revision_digest`, `analysis_parent_snapshot_id`, and the existing Phase 1 `rename_resolution.as_digest_input()`; Phase 2 must not drop the rename input when extending this payload. Add an exact-preimage test for an empty resolution, a unique rename, and an ambiguous rename. This removes any circularity between parser provenance and pipeline identity while ensuring a changed installed model invalidates reuse without pretending the documents changed. Update `memory_status` to use the same no-download runtime-first material-fingerprint path and the source-revision helper, so freshness and indexing cannot disagree. `index_repository` constructs `IngestedCorpus`, invokes analysis, merges Phase 1 records plus `ParsedCorpus` warning/derivation and all Phase 2 results, and publishes one `SnapshotBundle`. Extend `IndexResult`/CLI JSON with claim and decision counts.
+Change `pipeline_fingerprint` to accept the already loaded `NlpRuntime` identity and cover every Phase 2 Python module/resource, installed spaCy/scikit-learn version, configured bounded model artifact digest, the `ModelArtifactLimits` constants, and report code. Index order is exact: load config and discover sources; compute `canonical.source_revision_digest(item.content_hash for item in inputs)`; load the installed/no-download runtime through the sole confined/regular-file/no-symlink/capped artifact routine from Task 2; fingerprint code, dependency versions, and that runtime artifact; compute material digest; perform unchanged observation-only reuse; then parse/analyze only when material changed. `memory_status` uses that identical runtime loader, artifact limits, and canonical source-revision helper, so freshness and indexing either produce the same digests or the same visible artifact-limit error. Preserve Phase 1's deterministic `input_digest` canonical payload exactly: `material_input_digest`, `source_revision_digest`, `analysis_parent_snapshot_id`, and `rename_resolution.as_digest_input()`. Add an exact-preimage test for an empty resolution, a unique rename, and an ambiguous rename. This removes any circularity between parser provenance and pipeline identity while ensuring a changed installed model invalidates reuse without pretending the documents changed. `index_repository` constructs `IngestedCorpus`, invokes analysis, merges Phase 1 records plus all `ParsedCorpus.warnings`, all `ParsedCorpus.derivations`, and all Phase 2 results, then publishes one `SnapshotBundle`. Extend `IndexResult`/CLI JSON with claim and decision counts.
 
 - [ ] **Step 4: Run the early report checkpoint**
 
@@ -3000,7 +3165,7 @@ Expected: the entire suite passes; the fixture produces an evidence-backed repor
 - [ ] **Step 5: Commit the early checkpoint**
 
 ```bash
-git add scripts/architecture_graph/report.py scripts/architecture_graph/analysis.py scripts/architecture_graph/review_commands.py scripts/architecture_graph/fingerprint.py scripts/architecture_graph/sources.py scripts/architecture_graph/records.py scripts/architecture_graph/indexer.py scripts/architecture_graph/snapshot.py scripts/architecture_graph/query.py scripts/architecture_graph/cli.py tests/helpers/phase2_catalog.py tests/test_jsonl_store.py tests/test_phase1_cli.py tests/test_sources.py tests/test_snapshot.py tests/test_report.py tests/test_analysis_pipeline.py
+git add scripts/architecture_graph/report.py scripts/architecture_graph/analysis.py scripts/architecture_graph/review_commands.py scripts/architecture_graph/fingerprint.py scripts/architecture_graph/records.py scripts/architecture_graph/indexer.py scripts/architecture_graph/snapshot.py scripts/architecture_graph/query.py scripts/architecture_graph/cli.py tests/helpers/phase2_catalog.py tests/test_jsonl_store.py tests/test_phase1_cli.py tests/test_sources.py tests/test_snapshot.py tests/test_report.py tests/test_analysis_pipeline.py
 git commit -m "feat: publish evidence-backed decision reports"
 ```
 
@@ -3227,8 +3392,9 @@ git commit -m "feat: build typed architecture graph projections"
 - Produces: `infer_decision_lineage(previous, current, source_lineage, derivation_id, jaccard_threshold=0.80) -> tuple[Record, ...]`.
 - Produces: `DecisionHistory.metrics_for(decision, current_lineage) -> HistoryFeatures`.
 - Produces: `inherit_history_features(successor, review_lineage, base_history) -> HistoryFeatures` for enriched/reviewed layers.
-- Produces: `load_decision_history(project, parent_snapshot_id, current_source_revision_digest, configuration_digest, pipeline_digest, persistence_transitions=5, churn_transitions=3, traversal_safety_limit=100) -> HistoryResult`.
-- `HistoryResult` contains source and decision lineage, history, updated decisions, and both persisted deterministic lineage derivations.
+- Produces: `load_decision_history(project: ProjectPaths, parent_snapshot_id: str | None, current_source_revision_digest: str, *, persistence_transitions: int = 5, churn_transitions: int = 3, traversal_safety_limit: int = 100) -> DecisionHistory`; this function performs verified immutable ancestor reads only and emits no durable record.
+- Produces: `apply_decision_history(history: DecisionHistory, current_catalog: RecordCatalog, *, configuration_digest: str, pipeline_digest: str, jaccard_threshold: float = 0.80) -> HistoryResult`; this function exclusively owns current source/decision matching, lineage derivations, predecessor locators, and current decision finalization.
+- `HistoryResult` contains source and decision lineage, the supplied/advanced history, updated decisions, and both persisted deterministic lineage derivations.
 
 - [ ] **Step 1: Write failing match-order, tie, persistence, and churn tests**
 
@@ -3280,15 +3446,23 @@ def test_tied_jaccard_candidates_are_add_remove_not_lineage() -> None:
 def test_persistence_counts_deterministic_revisions_not_observations(tmp_path) -> None:
     fixture = history_project(
         tmp_path,
-        semantic_digests=("sha256:same", "sha256:same", "sha256:same"),
+        semantic_digests=(
+            "sha256:" + "c" * 64,
+            "sha256:" + "c" * 64,
+            "sha256:" + "c" * 64,
+        ),
         observations_per_snapshot=(3, 1, 4),
     )
-    result = load_decision_history(
+    history = load_decision_history(
         fixture.project,
         fixture.parent_snapshot_id,
         fixture.current_source_revision_digest,
-        "sha256:config",
-        "sha256:pipeline",
+    )
+    result = apply_decision_history(
+        history,
+        fixture.current_catalog,
+        configuration_digest="sha256:" + "d" * 64,
+        pipeline_digest="sha256:" + "e" * 64,
     )
     metrics = result.history.metrics_for(fixture.current_decision, fixture.current_lineage)
     assert metrics.persistence_across_snapshots == 0.8
@@ -3298,9 +3472,13 @@ def test_persistence_counts_deterministic_revisions_not_observations(tmp_path) -
 def test_semantic_change_resets_persistence_and_increments_churn(tmp_path) -> None:
     fixture = history_project(
         tmp_path,
-        semantic_digests=("sha256:one", "sha256:two", "sha256:two"),
+        semantic_digests=(
+            "sha256:" + "1" * 64,
+            "sha256:" + "2" * 64,
+            "sha256:" + "2" * 64,
+        ),
         observations_per_snapshot=(1, 1, 1),
-        current_digest="sha256:three",
+        current_digest="sha256:" + "3" * 64,
     )
     result = fixture.load()
     metrics = result.history.metrics_for(fixture.current_decision, ())
@@ -3400,6 +3578,8 @@ def test_reviewed_successor_inherits_base_persistence_and_churn(tmp_path) -> Non
     ]
 ```
 
+`history_project` writes only syntactically valid `sha256:` plus 64-lowercase-hex digests. Its `fixture.load()` helper is exactly the composition of `load_decision_history(...)` followed by `apply_decision_history(..., fixture.current_catalog, ...)`; it never hides a second matching or finalization path.
+
 Run:
 
 ```bash
@@ -3410,19 +3590,19 @@ Expected: FAIL because deterministic decision history does not exist.
 
 - [ ] **Step 2: Implement ordered unique lineage matching**
 
-First create a source-lineage derivation whose local inputs are sorted current source IDs and whose external inputs are the exact prior source locators. It does not name any lineage record. Link a previous and current source version only when their Phase 1 `logical_source_id` is equal and unique on both sides. This consumes the explicit document ID, persistent path mapping, or unique Git-rename decision already recorded by Phase 1; Phase 2 never guesses a rename from prose similarity. A source tie emits no lineage. Its predecessor locator names the verified parent snapshot and content digest; successor is local. Source-lineage records cite only this source-lineage derivation.
+`apply_decision_history` reads current sources, decisions, member claims, and reducer derivations only from its one `current_catalog`. First create a source-lineage derivation whose local inputs are sorted current source IDs and whose external inputs are the exact prior source locators already verified in `DecisionHistory`. It does not name any lineage record. Link a previous and current source version only when their Phase 1 `logical_source_id` is equal and unique on both sides. This consumes the explicit document ID, persistent path mapping, or unique Git-rename decision already recorded by Phase 1; Phase 2 never guesses a rename from prose similarity. A source tie emits no lineage. Its predecessor locator names the verified parent snapshot and content digest; successor is local. Source-lineage records cite only this source-lineage derivation.
 
 Then match unmatched decisions in order: exact explicit decision/ADR ID; exact logical-source ID plus normalized heading; unique exact primary claim key in same logical source; unique predecessor at least 0.80 Jaccard across canonical claim keys. At each stage require unique predecessor and successor. Any tie emits no lineage. `match_decision_predecessors` returns immutable match descriptors before it creates records. Create a separate decision-history derivation whose local inputs are the sorted durable member-claim IDs, current source IDs, decision-reducer derivation IDs, and already materialized source-lineage IDs that produced the provisional decisions; provisional/current output decision IDs are never inputs because that version is not persisted. External inputs are the matched prior decision locators. The derivation never takes a decision-lineage record as input. Its output identity key may name sorted successor identity keys without treating them as input records. Identity hashes predecessor ID/digest and external snapshot locator, finalized successor identity key, reason, and the decision-history derivation. Sort by predecessor then successor.
 
-- [ ] **Step 3: Load only deterministic source revisions and compute history**
+- [ ] **Step 3: Load verified parent revisions, then apply them once to the current catalog**
 
-Resolve an enriched/reviewed start to `base_deterministic_snapshot_id`; a deterministic start is already its own base. Follow `analysis_parent_snapshot_id` and group adjacent deterministic manifests by equal required `source_revision_digest`. Keep only the nearest (newest) snapshot as the representative of each completed group, continue until five distinct source revisions are collected, and enforce a separate default traversal safety limit of 100 verified manifests so rebuilds cannot hide older revisions or cause unbounded reads. Never use observation count or raw deterministic snapshot count for persistence/churn.
+`load_decision_history` resolves an enriched/reviewed start to `base_deterministic_snapshot_id`; a deterministic start is already its own base. It follows `analysis_parent_snapshot_id`, verifies every immutable manifest/payload it opens, and groups adjacent deterministic manifests by equal required `source_revision_digest`. Keep only the nearest (newest) snapshot as the representative of each completed group, continue until five distinct source revisions are collected, and enforce a separate default traversal safety limit of 100 verified manifests so rebuilds cannot hide older revisions or cause unbounded reads. The returned frozen `DecisionHistory` owns those verified ancestor snapshots, locators, and prior metrics; the loader creates no derivation, lineage, warning, successor, or other durable record. Never use observation count or raw deterministic snapshot count for persistence/churn.
 
-The caller supplies the current build's source-revision digest because it is not published yet. If it equals the immediate deterministic parent's digest, match current decisions to that parent and inherit their history features exactly; do not compare the current semantic digest, reset persistence, add churn, or create another transition. The rebuilt snapshot becomes the newest representative for that group only after publication. New decisions with no unique predecessor begin with explicit unknown/initial history, not fabricated persistence. Pipeline, model, ontology, scoring, report, path/role/authority, and duplicate-copy-only changes can therefore rebuild outputs without becoming architecture-document revisions.
+The caller supplies the current build's source-revision digest to the loader because it is not published yet. After deterministic decision reduction, `analyze_corpus` calls `apply_decision_history` exactly once with the complete provisional `RecordCatalog`. If the digest equals the immediate deterministic parent's digest, the apply step matches current decisions to that parent and inherits their history features exactly; it does not compare the current semantic digest, reset persistence, add churn, or create another transition. The rebuilt snapshot becomes the newest representative for that group only after publication. New decisions with no unique predecessor begin with explicit unknown/initial history, not fabricated persistence. Pipeline, model, ontology, scoring, report, path/role/authority, and duplicate-copy-only changes can therefore rebuild outputs without becoming architecture-document revisions.
 
 Persistence starts 0.50, adds 0.10 for each prior consecutive accepted/active revision with identical semantic digest, and caps at 1.00. A semantic change breaks the run. Churn is `min(1, changed semantic transitions across current plus last three deterministic transitions / 3)`. Rejected/superseded is inactive. The decision-history derivation `input_ids` contain only durable current member claims, sources, reducer derivations, and source-lineage records that resolve inside the output bundle; they are disjoint from every updated decision ID. Each prior decision input uses an `ExternalRecordRef` containing its parent snapshot, kind, stable ID, and content digest; the ordered external references participate in derivation identity and are verified by reopening those immutable parent snapshots. Snapshot IDs are therefore never smuggled into the local `input_ids` namespace.
 
-For each match descriptor, add the typed `{snapshot_id, record_id, content_digest, reason}` predecessor locator and the decision-history derivation ID to the current decision, then finalize that same-ID successor and recompute its content digest. Only after finalization may the implementation create the decision-lineage record, whose `successor_content_digest` must equal the successor that will be published. Return those successors in `HistoryResult.updated_decisions_by_id`. Genesis decisions retain explicit null. Task 14 replaces the pre-history decision version with this successor before ranking, reporting, and publication; it never appends both versions.
+For each match descriptor, `apply_decision_history` adds the typed `{snapshot_id, record_id, content_digest, reason}` predecessor locator and the decision-history derivation ID to the current decision, then finalizes that same-ID successor and recomputes its content digest. Only after finalization may it create the decision-lineage record, whose `successor_content_digest` must equal the successor that will be published. Return those successors in `HistoryResult.updated_decisions_by_id`. Genesis decisions retain explicit null. Task 14 replaces the pre-history decision version with this successor before ranking, reporting, and publication; it never appends both versions. No other function infers current lineage or finalizes history successors.
 
 Only distinct deterministic source-revision groups advance persistence or churn. When an enriched or reviewed snapshot ranks a successor, `inherit_history_features` follows its unique accepted-successor lineage, including an identity-changing decision lineage, back to the base deterministic decision and returns that base position's history features. A same-ID successor uses its external predecessor locator; a new-ID successor uses the reviewed lineage record. Missing or ambiguous base lineage yields explicit unknown history inputs rather than treating the review correction as a source revision. A reviewed semantic correction may change authority, modality, impact, diagnostics, structure, and final score, but it cannot reset persistence or increment churn.
 
@@ -3457,7 +3637,7 @@ git commit -m "feat: track deterministic decision history"
 - Produces: `select_bridge_sample(node_ids, sample_size) -> tuple[str, ...]`.
 - Produces: `compute_structural_features(projection, config) -> Mapping[str, StructuralDecisionFeatures]`.
 - Produces: `rank_decisions(..., configuration_digest, pipeline_digest) -> RankingResult`.
-- Produces final `analyze_corpus(..., project_config: ProjectConfig, history, previous_decisions=(), source_lineage=(), proposals=(), reviews=()) -> AnalysisResult`.
+- Produces final `analyze_corpus(..., project_config: ProjectConfig, history: DecisionHistory, configuration_digest: str, pipeline_digest: str, proposals=(), reviews=()) -> AnalysisResult`; prior decisions/source lineage are owned by `DecisionHistory` and are not separate arguments.
 
 - [ ] **Step 1: Write failing metric, sampling, normalization, and final-score tests**
 
@@ -3574,9 +3754,9 @@ Confidence-weighted degree ignores direction and sums, for each distinct adjacen
 
 For each decision, add history persistence/churn. Compute seven-term criticality, six-term review priority, and unchanged confidence from exact resource weights. Round before sorting. Rank each score descending with stable-ID tie-break. Preserve retrieval. Every feature explanation stores value, input IDs, and derivation IDs. Final ranking stage returns and persists one scoring derivation; every ranking cites it. Ranking content includes projection digest and history; identity remains decision/lens/layer/scoring-version.
 
-Replace the Task 11 intrinsic-only tail with one `_finalize_analysis_tail` used by both `analyze_corpus` and `analyze_reviewed_catalog`. It builds evidence/semantic graphs, inserts structural metrics, obtains deterministic history features, writes final rankings for all three lifecycle lenses, and only then renders the report. No public finalizer may publish an intrinsic ranking after this task.
+Replace the Task 11 intrinsic-only tail with one `_finalize_analysis_tail` used by both `analyze_corpus` and `analyze_reviewed_catalog`. It receives an already materialized `Mapping[str, HistoryFeatures]`, builds evidence/semantic graphs, inserts structural metrics, writes final rankings for all three lifecycle lenses, and only then renders the report from the exact current/review selection map defined in Task 11. It never opens snapshots, loads history, infers lineage, or finalizes decision successors. No public finalizer may publish an intrinsic ranking after this task.
 
-`analyze_corpus` infers source and decision lineage, passes only `project_config.aliases` to entity resolution, replaces each current decision with `history_result.updated_decisions_by_id.get(id, decision)`, and rebuilds the catalog with exactly one content version per stable ID. `analyze_reviewed_catalog` follows each reviewed successor's exact predecessor/lineage back to the base deterministic decision, calls `inherit_history_features`, and recomputes reviewed semantic projection, structural metrics, scores, and report from the cascaded catalog. Missing/ambiguous inheritance remains explicit unknown input, never a new source revision. For the snapshot's provenance layer, the shared tail builds current, review, and historical projections; the historical projection represents that immutable snapshot's state. It computes and persists `ranking_phase: final` rankings with non-null projection digests for all three lenses, persists the projection-independent evidence graph and lineage, and renders the final report. Semantic aggregates remain ephemeral. A query for an unavailable provenance layer returns a selector error and never substitutes another layer or lens. `index_repository` passes its already validated configuration and current `source_revision_digest` when it loads history from the chosen analysis parent before analysis. Identical material input still takes observation-only reuse; changed material reruns all global stages, while a same-source-revision rebuild inherits history instead of advancing it.
+`index_repository` resolves the chosen analysis parent and calls `load_decision_history(project, analysis_parent_id, current_source_revision_digest)` before analysis; that verified read needs no current decision. `analyze_corpus` passes the exact immutable `IngestedCorpus` and only `project_config.aliases` to entity resolution, builds the provisional post-reducer catalog, calls `apply_decision_history(history, provisional_catalog, configuration_digest=..., pipeline_digest=...)` exactly once, replaces each current decision with `history_result.updated_decisions_by_id.get(id, decision)`, merges returned lineage/derivations once, and rebuilds the catalog with exactly one content version per stable ID. It passes the resulting per-decision history-feature map into `_finalize_analysis_tail`. `analyze_reviewed_catalog` instead follows each reviewed successor's exact predecessor/lineage back to the base deterministic decision, calls `inherit_history_features`, and passes that map to the same tail before recomputing reviewed semantic projection, structural metrics, scores, and report from the cascaded catalog. Missing/ambiguous inheritance remains explicit unknown input, never a new source revision. For the snapshot's provenance layer, the shared tail builds current, review, and historical projections; the historical projection represents that immutable snapshot's state. It computes and persists `ranking_phase: final` rankings with non-null projection digests for all three lenses, persists the projection-independent evidence graph and lineage, and renders the final report using current lens for sections one/two and review lens for sections three/four. Semantic aggregates remain ephemeral. A query for an unavailable provenance layer returns a selector error and never substitutes another layer or lens. Identical material input still takes observation-only reuse; changed material reruns all global stages, while a same-source-revision rebuild inherits history instead of advancing it.
 
 Extend `tests/test_analysis_pipeline.py` with a repository configuration declaring `Checkout API: checkout-service`; assert the full production orchestrator resolves that alias, and that removing the alias changes the configuration/material digest and leaves the surface unresolved. This proves aliases are not a fixture-only injection path.
 
@@ -3618,6 +3798,10 @@ git commit -m "feat: rank decisions with semantic graph metrics"
 Create `tests/test_decision_queries.py` against a real published fixture snapshot:
 
 ```python
+from architecture_graph.canonical import canonical_bytes
+from architecture_graph.features import ScoringConfig
+
+
 def test_decisions_use_stored_rank_and_stable_id() -> None:
     reader = query_reader()
     page = query_decisions(reader, DecisionQuery.defaults(score="criticality"))
@@ -3656,7 +3840,22 @@ def test_neighbors_and_evidence_have_fixed_orders() -> None:
         for item in neighbors.items
     )
     evidence = query_evidence(reader, EvidenceQuery.defaults("decision:a"))
-    assert evidence.items[0]["source_authority"] >= evidence.items[-1]["source_authority"]
+    precedence = {
+        authority: index
+        for index, authority in enumerate(
+            ScoringConfig.load_v1().source_authority_precedence
+        )
+    }
+    order = [
+        (
+            -precedence[item["source_authority"]],
+            item["relative_path"],
+            canonical_bytes(item["span"]),
+            item["id"],
+        )
+        for item in evidence.items
+    ]
+    assert order == sorted(order)
 
 
 def test_missing_snapshot_query_does_not_mutate_memory(tmp_path) -> None:
@@ -4230,7 +4429,7 @@ architecture-graph review append . --target-kind claim --target-id claim:ID --ta
 architecture-graph review finalize . --json
 ```
 
-Update configuration guidance: `spacy_model` names an already-installed package; indexing records observed package/model versions and artifact digest; absence emits `model_unavailable`; no command downloads it.
+Update configuration guidance: `spacy_model` names an already-installed package; status and index use the same package-root-confined, regular-file-only, no-symlink artifact traversal capped at 8,192 visited paths, 4,096 files, and 536,870,912 bytes; an unsafe or over-limit package fails visibly rather than producing a partial fingerprint. Indexing records observed package/model versions and artifact digest; absence emits `model_unavailable`; no command downloads it.
 
 - [ ] **Step 5: Run complete verification**
 
