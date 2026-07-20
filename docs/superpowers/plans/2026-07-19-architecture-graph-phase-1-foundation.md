@@ -5056,6 +5056,31 @@ git commit -m "feat: ingest PlantUML architecture relations"
 - Produces: `ingest_source(source: SourceInput, context: IngestionContext) -> IngestionResult`.
 - Produces: `ingest_sources(sources: Sequence[SourceInput], context: IngestionContext) -> IngestionResult`.
 
+**Failure and evidence contract:**
+
+- The public structured adapter accepts only `yaml` and `json`; the public
+  plain-text adapter accepts only `text`. A wrong-kind direct call and an
+  unknown dispatcher kind raise `ValueError` before a derivation is created.
+- A source-level failure means no trustworthy node tree exists (decode error,
+  malformed syntax, duplicate JSON/YAML mapping key, or a parser/composition
+  `RecursionError`/`UnicodeError`). It returns the deterministic derivation and
+  one provenance-bearing `parse_failed` warning, emits no source segments, and
+  does not stop `ingest_sources` from processing other paths.
+- A leaf/subtree failure occurs after a trustworthy tree exists. Traversal is
+  isolated at each sequence child and mapping value, so a post-compose
+  `RecursionError`, invalid scalar materialization, unencodable scalar,
+  zero-width implicit YAML scalar, cyclic subtree, merge key, or non-string
+  mapping key emits a warning for that child/entry and preserves valid siblings.
+  Zero-width scalars fail closed as `parse_failed`; merge keys and non-string
+  keys fail closed as `unsupported_construct`. None of these constructs may
+  produce a segment.
+- Every emitted segment has exactly one evidence record. Evidence is always
+  obtained with the shared `exact_source_excerpt()` helper from an exclusive
+  `SourceSpan`; this preserves LF or CRLF bytes within a multiline excerpt and
+  excludes only the final line terminator.
+- `ingest_sources` rejects duplicate `relative_path` values before sorting or
+  dispatching, then dispatches the unique sources in lexical path order.
+
 - [ ] **Step 1: Add structured and text fixtures**
 
 Create `tests/fixtures/phase1_repo/architecture/services.yaml`:
@@ -5089,18 +5114,18 @@ Append to `tests/test_other_ingest.py`:
 ```python
 import pytest
 
-from architecture_graph.ingest import ingest_source
+from architecture_graph.ingest import ingest_source, ingest_sources
+from architecture_graph.ingest.diagrams import exact_source_excerpt
 from architecture_graph.ingest.plaintext import segment_plaintext
 from architecture_graph.ingest.structured import segment_structured
+from architecture_graph.records import SourceSpan, validate_record_shape
 
 
 def test_yaml_and_json_emit_pointer_addressed_scalar_segments() -> None:
-    yaml_result = segment_structured(
-        source("architecture/services.yaml", "yaml"), CONTEXT
-    )
-    json_result = segment_structured(
-        source("architecture/interfaces.json", "json"), CONTEXT
-    )
+    yaml_source = source("architecture/services.yaml", "yaml")
+    json_source = source("architecture/interfaces.json", "json")
+    yaml_result = segment_structured(yaml_source, CONTEXT)
+    json_result = segment_structured(json_source, CONTEXT)
     assert {
         item["metadata"]["json_pointer"]: item["metadata"]["scalar_value"]
         for item in yaml_result.segments
@@ -5111,7 +5136,23 @@ def test_yaml_and_json_emit_pointer_addressed_scalar_segments() -> None:
     assert next(iter(json_result.segments))["metadata"]["json_pointer"].startswith(
         "/events/OrderPlaced/"
     )
-    assert all(item["evidence_ids"] for item in json_result.segments)
+    for item_source, result in (
+        (yaml_source, yaml_result),
+        (json_source, json_result),
+    ):
+        derivation_ids = {item["id"] for item in result.derivations}
+        evidence_by_id = {item["id"]: item for item in result.evidence}
+        for record in (*result.segments, *result.evidence, *result.derivations):
+            validate_record_shape(record)
+        for segment in result.segments:
+            assert len(segment["evidence_ids"]) == 1
+            assert set(segment["derivation_ids"]) <= derivation_ids
+            evidence = evidence_by_id[segment["evidence_ids"][0]]
+            assert evidence["segment_id"] == segment["id"]
+            assert evidence["derivation_ids"] == segment["derivation_ids"]
+            assert evidence["text"] == exact_source_excerpt(
+                item_source, SourceSpan(**evidence["span"])
+            )
 
 
 def test_duplicate_or_malformed_structured_input_is_a_visible_warning() -> None:
@@ -5124,6 +5165,26 @@ def test_duplicate_or_malformed_structured_input_is_a_visible_warning() -> None:
     assert result.segments == ()
     assert [item["code"] for item in result.warnings] == ["parse_failed"]
     assert "duplicate mapping key" in result.warnings[0]["message"]
+    validate_record_shape(result.warnings[0])
+    assert result.warnings[0]["source_version_id"] == (
+        result.derivations[0]["input_ids"][0]
+    )
+    assert result.warnings[0]["derivation_ids"] == [result.derivations[0]["id"]]
+
+
+def test_duplicate_json_key_rejects_the_whole_source() -> None:
+    result = segment_structured(
+        source(
+            "architecture/duplicate.json",
+            "json",
+            '{"service":"checkout","service":"orders"}',
+        ),
+        CONTEXT,
+    )
+    assert result.segments == ()
+    assert [item["code"] for item in result.warnings] == ["parse_failed"]
+    assert "duplicate mapping key" in result.warnings[0]["message"]
+    assert result.warnings[0]["derivation_ids"] == [result.derivations[0]["id"]]
 
 
 def test_structured_scalar_failure_does_not_drop_valid_siblings() -> None:
@@ -5212,6 +5273,70 @@ def test_recursive_yaml_alias_is_rejected_without_recursing() -> None:
     assert "cyclic YAML alias at /root/self" in result.warnings[0]["message"]
 
 
+def test_deep_structured_input_becomes_a_source_warning() -> None:
+    result = segment_structured(
+        source(
+            "architecture/deep.yaml",
+            "yaml",
+            ("- " * 1_200) + "leaf\n",
+        ),
+        CONTEXT,
+    )
+    assert result.segments == ()
+    assert [item["code"] for item in result.warnings] == ["parse_failed"]
+    assert "recursion" in result.warnings[0]["message"].casefold()
+    assert result.warnings[0]["derivation_ids"] == [result.derivations[0]["id"]]
+
+
+def test_unencodable_json_leaf_does_not_drop_valid_siblings() -> None:
+    result = segment_structured(
+        source(
+            "architecture/surrogate.json",
+            "json",
+            '{"bad":"\\ud800","good":"ok"}',
+        ),
+        CONTEXT,
+    )
+    assert {
+        item["metadata"]["json_pointer"]: item["metadata"]["scalar_value"]
+        for item in result.segments
+    } == {"/good": "ok"}
+    assert [item["code"] for item in result.warnings] == ["parse_failed"]
+    assert "/bad" in result.warnings[0]["message"]
+    assert result.warnings[0]["derivation_ids"] == [result.derivations[0]["id"]]
+
+
+@pytest.mark.parametrize(
+    ("text", "warning_code", "pointer"),
+    [
+        ("good: yes\nempty:\n", "parse_failed", "/empty"),
+        (
+            "defaults: &defaults\n  owner: commerce\ngood: yes\n<<: *defaults\n",
+            "unsupported_construct",
+            "/<<",
+        ),
+        ("good: yes\n7: seven\n", "unsupported_construct", "/7"),
+    ],
+)
+def test_unsupported_yaml_constructs_fail_closed_per_leaf_or_entry(
+    text: str, warning_code: str, pointer: str
+) -> None:
+    result = segment_structured(
+        source("architecture/unsupported.yaml", "yaml", text), CONTEXT
+    )
+    assert any(
+        item["metadata"]["json_pointer"] == "/good"
+        for item in result.segments
+    )
+    assert pointer not in {
+        item["metadata"]["json_pointer"] for item in result.segments
+    }
+    assert warning_code in [item["code"] for item in result.warnings]
+    warning = next(item for item in result.warnings if item["code"] == warning_code)
+    validate_record_shape(warning)
+    assert warning["derivation_ids"] == [result.derivations[0]["id"]]
+
+
 def test_shared_yaml_anchor_keeps_distinct_segment_evidence_links() -> None:
     result = segment_structured(
         source(
@@ -5226,9 +5351,7 @@ def test_shared_yaml_anchor_keeps_distinct_segment_evidence_links() -> None:
         if item["metadata"]["json_pointer"] in {"/primary", "/backup"}
     ]
     assert len(aliased) == 2
-    evidence = {
-        item["segment_id"]: item for item in result.evidence
-    }
+    evidence = {item["segment_id"]: item for item in result.evidence}
     assert len({evidence[item["id"]]["id"] for item in aliased}) == 2
     assert {evidence[item["id"]]["text"] for item in aliased} == {"commerce"}
 
@@ -5253,6 +5376,27 @@ def test_multiline_scalar_evidence_is_the_exact_source_slice() -> None:
     assert item_evidence["text"] == '"Checkout owns\n  orders"'
 
 
+def test_structured_multiline_evidence_preserves_crlf_bytes() -> None:
+    item_source = source(
+        "architecture/crlf.yaml",
+        "yaml",
+        'summary: "Checkout owns\r\n  orders"\r\nowner: commerce\r\n',
+    )
+    result = segment_structured(item_source, CONTEXT)
+    summary = next(
+        item
+        for item in result.segments
+        if item["metadata"]["json_pointer"] == "/summary"
+    )
+    item_evidence = next(
+        item for item in result.evidence if item["segment_id"] == summary["id"]
+    )
+    assert item_evidence["text"] == '"Checkout owns\r\n  orders"'
+    assert item_evidence["text"] == exact_source_excerpt(
+        item_source, SourceSpan(**item_evidence["span"])
+    )
+
+
 def test_oversized_structured_scalar_is_visible_and_skipped() -> None:
     bounded_context = IngestionContext(
         configuration_digest=CONTEXT.configuration_digest,
@@ -5275,15 +5419,24 @@ def test_oversized_structured_scalar_is_visible_and_skipped() -> None:
 
 
 def test_plain_text_uses_paragraph_boundaries() -> None:
-    result = segment_plaintext(source("architecture/notes.txt", "text"), CONTEXT)
+    item_source = source("architecture/notes.txt", "text")
+    result = segment_plaintext(item_source, CONTEXT)
     assert [item["text"] for item in result.segments] == [
         "Checkout owns the order lifecycle. It publishes OrderPlaced after payment authorization.",
         "Warehouse consumes OrderPlaced idempotently.",
     ]
     assert [item["span"] for item in result.segments] == [
-        {"start_line": 1, "end_line": 2, "start_column": 1, "end_column": None},
-        {"start_line": 4, "end_line": 4, "start_column": 1, "end_column": None},
+        {"start_line": 1, "end_line": 2, "start_column": 1, "end_column": 54},
+        {"start_line": 4, "end_line": 4, "start_column": 1, "end_column": 45},
     ]
+    evidence_by_id = {item["id"]: item for item in result.evidence}
+    for segment in result.segments:
+        validate_record_shape(segment)
+        evidence = evidence_by_id[segment["evidence_ids"][0]]
+        validate_record_shape(evidence)
+        assert evidence["text"] == exact_source_excerpt(
+            item_source, SourceSpan(**segment["span"])
+        )
 
 
 def test_plain_text_splits_oversized_paragraphs_with_exact_evidence() -> None:
@@ -5310,16 +5463,17 @@ def test_plain_text_splits_oversized_paragraphs_with_exact_evidence() -> None:
 
 
 def test_plain_text_multiline_evidence_preserves_crlf_bytes() -> None:
-    result = segment_plaintext(
-        source(
-            "architecture/crlf.txt",
-            "text",
-            "Checkout owns orders.\r\nWorkers read them.\r\n",
-        ),
-        CONTEXT,
+    item_source = source(
+        "architecture/crlf.txt",
+        "text",
+        "Checkout owns orders.\r\nWorkers read them.\r\n",
     )
+    result = segment_plaintext(item_source, CONTEXT)
     assert result.evidence[0]["text"] == (
         "Checkout owns orders.\r\nWorkers read them."
+    )
+    assert result.evidence[0]["text"] == exact_source_excerpt(
+        item_source, SourceSpan(**result.evidence[0]["span"])
     )
 
 
@@ -5349,6 +5503,32 @@ def test_dispatch_is_explicit_and_records_the_adapter(
     }
     result = ingest_source(fixtures[kind], CONTEXT)
     assert result.derivations[0]["method"] == expected_method
+
+
+@pytest.mark.parametrize(
+    ("adapter", "wrong_kind"),
+    [(segment_structured, "text"), (segment_plaintext, "yaml")],
+)
+def test_direct_adapters_reject_wrong_source_kinds(adapter, wrong_kind: str) -> None:
+    with pytest.raises(ValueError, match="source kind"):
+        adapter(
+            source(f"architecture/wrong.{wrong_kind}", wrong_kind, "value"),
+            CONTEXT,
+        )
+
+
+def test_dispatch_rejects_an_unknown_source_kind() -> None:
+    with pytest.raises(ValueError, match="no ingestion adapter"):
+        ingest_source(
+            source("architecture/unknown.bin", "unsupported", "value"), CONTEXT
+        )
+
+
+def test_ingest_sources_rejects_duplicate_paths_before_dispatch() -> None:
+    first = source("architecture/same.txt", "text", "first")
+    duplicate = source("architecture/same.txt", "unsupported", "second")
+    with pytest.raises(ValueError, match="duplicate source path"):
+        ingest_sources((first, duplicate), CONTEXT)
 ```
 
 Run:
@@ -5376,6 +5556,7 @@ from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 from architecture_graph.ingest import IngestionContext, IngestionResult
 from architecture_graph.ingest.diagrams import (
     derivation_record,
+    exact_source_excerpt,
     segment_and_evidence,
     warning_record,
 )
@@ -5462,41 +5643,139 @@ def _scalar_value(node: ScalarNode) -> object:
     return value
 
 
+def _warning_span(node: Node) -> SourceSpan:
+    return SourceSpan(
+        node.start_mark.line + 1,
+        max(node.start_mark.line + 1, node.end_mark.line + 1),
+    )
+
+
+def _reject_duplicate_yaml_keys(
+    node: Node, visited: frozenset[int] = frozenset()
+) -> None:
+    identity = id(node)
+    if identity in visited:
+        return
+    descendants = visited | {identity}
+    if isinstance(node, MappingNode):
+        seen: set[tuple[str, str]] = set()
+        for key_node, value_node in node.value:
+            if isinstance(key_node, ScalarNode):
+                identity_key = (key_node.tag, key_node.value)
+                if identity_key in seen:
+                    raise ValueError(f"duplicate mapping key: {key_node.value}")
+                seen.add(identity_key)
+            _reject_duplicate_yaml_keys(value_node, descendants)
+    elif isinstance(node, SequenceNode):
+        for child in node.value:
+            _reject_duplicate_yaml_keys(child, descendants)
+
+
+StructuredIssue = tuple[str, str, SourceSpan]
+
+
 def _leaves(
     node: Node,
     pointer: str = "",
     active: frozenset[int] = frozenset(),
-) -> list[tuple[str, ScalarNode]]:
+) -> tuple[list[tuple[str, ScalarNode]], list[StructuredIssue]]:
     if isinstance(node, ScalarNode):
-        return [(pointer or "/", node)]
+        if node.start_mark.index == node.end_mark.index:
+            return [], [
+                (
+                    "parse_failed",
+                    f"{pointer or '/'}: zero-width implicit YAML scalar",
+                    _warning_span(node),
+                )
+            ]
+        return [(pointer or "/", node)], []
     identity = id(node)
     if identity in active:
-        raise ValueError(f"cyclic YAML alias at {pointer or '/'}")
+        return [], [
+            (
+                "parse_failed",
+                f"cyclic YAML alias at {pointer or '/'}",
+                _warning_span(node),
+            )
+        ]
     descendants = active | {identity}
     if isinstance(node, SequenceNode):
         leaves: list[tuple[str, ScalarNode]] = []
+        issues: list[StructuredIssue] = []
         for index, child in enumerate(node.value):
-            leaves.extend(_leaves(child, f"{pointer}/{index}", descendants))
-        return leaves
+            child_pointer = f"{pointer}/{index}"
+            try:
+                child_leaves, child_issues = _leaves(
+                    child, child_pointer, descendants
+                )
+            except (RecursionError, UnicodeError) as error:
+                child_leaves = []
+                child_issues = [
+                    (
+                        "parse_failed",
+                        f"{child_pointer}: traversal failed: {type(error).__name__}",
+                        _warning_span(child),
+                    )
+                ]
+            leaves.extend(child_leaves)
+            issues.extend(child_issues)
+        return leaves, issues
     if isinstance(node, MappingNode):
         leaves = []
-        seen: set[str] = set()
+        issues = []
         for key_node, value_node in node.value:
             if not isinstance(key_node, ScalarNode):
-                raise ValueError("structured mapping keys must be scalars")
-            key = key_node.value
-            if key in seen:
-                raise ValueError(f"duplicate mapping key: {key}")
-            seen.add(key)
-            leaves.extend(
-                _leaves(
-                    value_node,
-                    f"{pointer}/{_pointer_token(key)}",
-                    descendants,
+                issues.append(
+                    (
+                        "unsupported_construct",
+                        f"{pointer or '/'}: structured mapping keys must be scalar strings",
+                        _warning_span(key_node),
+                    )
                 )
-            )
-        return leaves
-    raise ValueError(f"unsupported YAML node: {type(node).__name__}")
+                continue
+            key = key_node.value
+            child_pointer = f"{pointer}/{_pointer_token(key)}"
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                issues.append(
+                    (
+                        "unsupported_construct",
+                        f"{child_pointer}: YAML merge keys are unsupported",
+                        _warning_span(key_node),
+                    )
+                )
+                continue
+            if key_node.tag != "tag:yaml.org,2002:str":
+                issues.append(
+                    (
+                        "unsupported_construct",
+                        f"{child_pointer}: structured mapping keys must be strings",
+                        _warning_span(key_node),
+                    )
+                )
+                continue
+            try:
+                child_leaves, child_issues = _leaves(
+                    value_node, child_pointer, descendants
+                )
+            except (RecursionError, UnicodeError) as error:
+                child_leaves = []
+                child_issues = [
+                    (
+                        "parse_failed",
+                        f"{child_pointer}: traversal failed: {type(error).__name__}",
+                        _warning_span(value_node),
+                    )
+                ]
+            leaves.extend(child_leaves)
+            issues.extend(child_issues)
+        return leaves, issues
+    return [], [
+        (
+            "unsupported_construct",
+            f"{pointer or '/'}: unsupported YAML node: {type(node).__name__}",
+            _warning_span(node),
+        )
+    ]
 
 
 def _node_span(node: ScalarNode) -> SourceSpan:
@@ -5511,6 +5790,10 @@ def _node_span(node: ScalarNode) -> SourceSpan:
 def segment_structured(
     source: SourceInput, context: IngestionContext
 ) -> IngestionResult:
+    if source.source_kind not in {"yaml", "json"}:
+        raise ValueError(
+            f"structured adapter does not accept source kind: {source.source_kind}"
+        )
     derivation = derivation_record(source, "structured_segmenter", context)
     derivation_id = str(derivation["id"])
     if source.decode_error is not None:
@@ -5533,12 +5816,23 @@ def segment_structured(
                 parse_float=_finite_json_float,
             )
         root = yaml.compose(source.text, Loader=yaml.SafeLoader)
-        leaves = [] if root is None else _leaves(root)
-    except (ValueError, json.JSONDecodeError, yaml.YAMLError) as error:
+        if root is None:
+            leaves: list[tuple[str, ScalarNode]] = []
+            issues: list[StructuredIssue] = []
+        else:
+            _reject_duplicate_yaml_keys(root)
+            leaves, issues = _leaves(root)
+    except (
+        RecursionError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+        yaml.YAMLError,
+    ) as error:
         warning = warning_record(
             source,
             code="parse_failed",
-            message=str(error),
+            message=f"structured source parse failed: {type(error).__name__}: {error}",
             span=SourceSpan(1, max(1, len(source.text.splitlines()))),
             possible_role="context",
             derivation_ids=(derivation_id,),
@@ -5547,7 +5841,17 @@ def segment_structured(
 
     segments: list[Record] = []
     evidence: list[Record] = []
-    warnings: list[Record] = []
+    warnings: list[Record] = [
+        warning_record(
+            source,
+            code=code,
+            message=message,
+            span=span,
+            possible_role="context",
+            derivation_ids=(derivation_id,),
+        )
+        for code, message, span in issues
+    ]
     for pointer, node in leaves:
         try:
             value = (
@@ -5560,7 +5864,7 @@ def segment_structured(
                 f"{json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)}"
             )
             span = _node_span(node)
-            exact_text = source.text[node.start_mark.index : node.end_mark.index]
+            exact_text = exact_source_excerpt(source, span)
             if max(len(text), len(exact_text)) > context.max_segment_chars:
                 warnings.append(
                     warning_record(
@@ -5593,16 +5897,21 @@ def segment_structured(
                 derivation_ids=(derivation_id,),
                 ordinal=len(segments),
             )
-        except (KeyError, OverflowError, TypeError, ValueError, yaml.YAMLError) as error:
+        except (
+            KeyError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+            yaml.YAMLError,
+        ) as error:
             warnings.append(
                 warning_record(
                     source,
                     code="parse_failed",
-                    message=f"{pointer}: {error}",
-                    span=SourceSpan(
-                        node.start_mark.line + 1,
-                        max(node.start_mark.line + 1, node.end_mark.line + 1),
-                    ),
+                    message=f"{pointer}: {type(error).__name__}: {error}",
+                    span=_warning_span(node),
                     possible_role="context",
                     derivation_ids=(derivation_id,),
                 )
@@ -5628,6 +5937,7 @@ from __future__ import annotations
 from architecture_graph.ingest import IngestionContext, IngestionResult
 from architecture_graph.ingest.diagrams import (
     derivation_record,
+    exact_source_excerpt,
     segment_and_evidence,
     warning_record,
 )
@@ -5635,30 +5945,22 @@ from architecture_graph.records import Record, SourceSpan
 from architecture_graph.sources import SourceInput
 
 
-def _exact_line_slice(text: str, start_line: int, end_line: int) -> str:
-    lines = text.splitlines(keepends=True)
-    start = sum(len(item) for item in lines[: start_line - 1])
-    end = sum(len(item) for item in lines[:end_line])
-    last = lines[end_line - 1]
-    if last.endswith("\r\n"):
-        end -= 2
-    elif last.endswith(("\r", "\n")):
-        end -= 1
-    return text[start:end]
-
-
 def _bounded_paragraphs(
-    paragraph: list[tuple[int, str]], max_chars: int, source_text: str
+    paragraph: list[tuple[int, str]], max_chars: int, source: SourceInput
 ) -> list[tuple[str, str, SourceSpan]]:
     normalized = " ".join(raw.strip() for _, raw in paragraph)
     if len(normalized) <= max_chars:
+        span = SourceSpan(
+            paragraph[0][0],
+            paragraph[-1][0],
+            1,
+            len(paragraph[-1][1]) + 1,
+        )
         return [
             (
                 normalized,
-                _exact_line_slice(
-                    source_text, paragraph[0][0], paragraph[-1][0]
-                ),
-                SourceSpan(paragraph[0][0], paragraph[-1][0]),
+                exact_source_excerpt(source, span),
+                span,
             )
         ]
 
@@ -5671,16 +5973,17 @@ def _bounded_paragraphs(
             if not evidence_text:
                 continue
             start_column = leading + offset + 1
+            span = SourceSpan(
+                line_number,
+                line_number,
+                start_column,
+                start_column + len(evidence_text),
+            )
             chunks.append(
                 (
                     evidence_text,
-                    evidence_text,
-                    SourceSpan(
-                        line_number,
-                        line_number,
-                        start_column,
-                        start_column + len(evidence_text),
-                    ),
+                    exact_source_excerpt(source, span),
+                    span,
                 )
             )
     return chunks
@@ -5689,6 +5992,10 @@ def _bounded_paragraphs(
 def segment_plaintext(
     source: SourceInput, context: IngestionContext
 ) -> IngestionResult:
+    if source.source_kind != "text":
+        raise ValueError(
+            f"plain-text adapter does not accept source kind: {source.source_kind}"
+        )
     derivation = derivation_record(source, "plaintext_segmenter", context)
     derivation_id = str(derivation["id"])
     if source.decode_error is not None:
@@ -5716,7 +6023,7 @@ def segment_plaintext(
     evidence: list[Record] = []
     for paragraph in paragraphs:
         for text, evidence_text, span in _bounded_paragraphs(
-            paragraph, context.max_segment_chars, source.text
+            paragraph, context.max_segment_chars, source
         ):
             segment, item_evidence = segment_and_evidence(
                 source,
@@ -5773,6 +6080,15 @@ def ingest_source(
 def ingest_sources(
     sources: Sequence[SourceInput], context: IngestionContext
 ) -> IngestionResult:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for source in sources:
+        if source.relative_path in seen:
+            duplicates.add(source.relative_path)
+        seen.add(source.relative_path)
+    if duplicates:
+        raise ValueError(f"duplicate source path: {sorted(duplicates)[0]}")
+
     result = IngestionResult()
     for source in sorted(sources, key=lambda item: item.relative_path):
         result = result.merge(ingest_source(source, context))
