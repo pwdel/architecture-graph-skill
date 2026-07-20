@@ -351,12 +351,11 @@ def test_mermaid_compound_line_splits_into_exact_statement_spans() -> None:
 
 
 def test_unsplittable_mermaid_compound_fails_closed_with_warning() -> None:
-    result = segment_markdown(
-        markdown_source(
-            "# Diagram\n\n```mermaid\nA --> B B --> C\n```\n"
-        ),
-        CONTEXT,
+    source = markdown_source(
+        "# Diagram\n\n```mermaid\nA --> B B --> C\n```\n"
     )
+    result = segment_markdown(source, CONTEXT)
+    repeated = segment_markdown(source, CONTEXT)
 
     assert not any(
         segment["segment_kind"] == "diagram_statement"
@@ -365,6 +364,14 @@ def test_unsplittable_mermaid_compound_fails_closed_with_warning() -> None:
     assert [warning["code"] for warning in result.warnings] == [
         "unsupported_construct"
     ]
+    assert result.warnings[0]["message"] == (
+        "unsplittable compound Mermaid statement"
+    )
+    assert result.warnings[0]["id"] == repeated.warnings[0]["id"]
+    assert (
+        result.warnings[0]["content_digest"]
+        == repeated.warnings[0]["content_digest"]
+    )
 
 
 def test_unclosed_front_matter_returns_only_warning_and_derivation() -> None:

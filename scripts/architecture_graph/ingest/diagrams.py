@@ -276,7 +276,11 @@ def diagram_statement_records(
                     warning_record(
                         source,
                         code="unsupported_construct",
-                        message="unsplittable compound diagram statement",
+                        message=(
+                            "unsplittable compound Mermaid statement"
+                            if language == "mermaid"
+                            else "unsplittable compound diagram statement"
+                        ),
                         span=SourceSpan(line_number, line_number, 1, len(raw) + 1),
                         possible_role=section_role,
                         derivation_ids=derivation_ids,
