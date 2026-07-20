@@ -17,6 +17,69 @@ CONTEXT = IngestionContext(
 )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("configuration_digest", ""),
+        ("configuration_digest", "sha256:short"),
+        ("configuration_digest", "SHA256:" + ("a" * 64)),
+        ("configuration_digest", "sha256:" + ("A" * 64)),
+        ("pipeline_digest", ""),
+        ("pipeline_digest", "sha256:short"),
+        ("pipeline_digest", "SHA256:" + ("b" * 64)),
+        ("pipeline_digest", "sha256:" + ("B" * 64)),
+    ],
+)
+def test_ingestion_context_rejects_invalid_digests(
+    field: str, value: object
+) -> None:
+    values: dict[str, object] = {
+        "configuration_digest": CONTEXT.configuration_digest,
+        "pipeline_digest": CONTEXT.pipeline_digest,
+        "tool_version": CONTEXT.tool_version,
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError):
+        IngestionContext(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("tool_version", [None, 1, "", " ", "\t\n"])
+def test_ingestion_context_rejects_invalid_tool_versions(
+    tool_version: object,
+) -> None:
+    with pytest.raises(ValueError):
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=tool_version,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("max_segment_chars", [True, False, 0, -1, -256, 255])
+def test_ingestion_context_rejects_invalid_segment_bounds(
+    max_segment_chars: object,
+) -> None:
+    with pytest.raises(ValueError):
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=CONTEXT.tool_version,
+            max_segment_chars=max_segment_chars,  # type: ignore[arg-type]
+        )
+
+
+def test_ingestion_context_accepts_the_exact_minimum_segment_bound() -> None:
+    context = IngestionContext(
+        configuration_digest=CONTEXT.configuration_digest,
+        pipeline_digest=CONTEXT.pipeline_digest,
+        tool_version=CONTEXT.tool_version,
+        max_segment_chars=256,
+    )
+
+    assert context.max_segment_chars == 256
+
+
 def markdown_source(text: str) -> SourceInput:
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return SourceInput(
@@ -322,3 +385,251 @@ def test_unclosed_front_matter_returns_only_warning_and_derivation() -> None:
         "unsupported_construct"
     ]
     assert "closing delimiter not found" in str(result.warnings[0]["message"])
+
+
+def test_nested_heading_path_at_exact_bound_keeps_full_path_and_role() -> None:
+    ancestor = "A" * 248
+    result = segment_markdown(
+        markdown_source(
+            f"# {ancestor}\n\n"
+            "## Decision\n\n"
+            "Publish events.\n\n"
+            "```mermaid\nCheckout --> Orders\n```\n"
+        ),
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=CONTEXT.tool_version,
+            max_segment_chars=256,
+        ),
+    )
+
+    body = [
+        segment
+        for segment in result.segments
+        if segment["segment_kind"] in {"paragraph", "diagram_statement"}
+    ]
+    assert result.warnings == ()
+    assert [segment["heading_path"] for segment in body] == [
+        [ancestor, "Decision"],
+        [ancestor, "Decision"],
+    ]
+    assert [segment["metadata"]["section_role"] for segment in body] == [
+        "decision",
+        "decision",
+    ]
+
+
+def test_overbound_ancestors_keep_complete_most_specific_heading_suffix() -> None:
+    ancestor = "A" * 249
+    result = segment_markdown(
+        markdown_source(
+            f"# {ancestor}\n\n"
+            "## Decision\n\n"
+            "Publish events.\n\n"
+            "```mermaid\nCheckout --> Orders\n```\n"
+        ),
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=CONTEXT.tool_version,
+            max_segment_chars=256,
+        ),
+    )
+
+    active_heading = next(
+        segment
+        for segment in result.segments
+        if segment["segment_kind"] == "heading"
+        and segment["text"] == "Decision"
+    )
+    body = [
+        segment
+        for segment in result.segments
+        if segment["segment_kind"] in {"paragraph", "diagram_statement"}
+    ]
+    assert active_heading["heading_path"] == ["Decision"]
+    assert active_heading["metadata"]["section_role"] == "decision"
+    assert [segment["heading_path"] for segment in body] == [
+        ["Decision"],
+        ["Decision"],
+    ]
+    assert [segment["metadata"]["section_role"] for segment in body] == [
+        "decision",
+        "decision",
+    ]
+    assert [warning["code"] for warning in result.warnings] == [
+        "segment_too_large"
+    ]
+
+
+def test_overbound_active_heading_uses_empty_context_semantics() -> None:
+    active = "Decision" + ("A" * 249)
+    result = segment_markdown(
+        markdown_source(
+            f"# {active}\n\n"
+            "Publish events.\n\n"
+            "```mermaid\nCheckout --> Orders\n```\n"
+        ),
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=CONTEXT.tool_version,
+            max_segment_chars=256,
+        ),
+    )
+
+    body = [
+        segment
+        for segment in result.segments
+        if segment["segment_kind"] in {"paragraph", "diagram_statement"}
+    ]
+    assert not any(
+        segment["segment_kind"] == "heading" for segment in result.segments
+    )
+    assert [segment["heading_path"] for segment in body] == [[], []]
+    assert [segment["metadata"]["section_role"] for segment in body] == [
+        "context",
+        "context",
+    ]
+    assert [warning["code"] for warning in result.warnings] == [
+        "segment_too_large"
+    ]
+
+
+def test_oversized_id_is_removed_from_all_remaining_segment_metadata() -> None:
+    oversized_id = "I" * 253
+    result = segment_markdown(
+        markdown_source(
+            f"---\nid: {oversized_id}\nstatus: accepted\n---\n"
+            "# Decision\n\nPublish events.\n\n"
+            "- Keep ordering.\n\n"
+            "```mermaid\nCheckout --> Orders\n```\n"
+        ),
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=CONTEXT.tool_version,
+            max_segment_chars=256,
+        ),
+    )
+
+    assert not any(
+        segment["segment_kind"] == "metadata_field"
+        and segment["metadata"]["metadata_key"] == "id"
+        for segment in result.segments
+    )
+    assert all(
+        segment["metadata"].get("adr_id") is None
+        for segment in result.segments
+    )
+    assert all(
+        segment["metadata"].get("adr_status") == "accepted"
+        for segment in result.segments
+    )
+    assert [warning["code"] for warning in result.warnings] == [
+        "segment_too_large"
+    ]
+
+
+def test_oversized_status_is_removed_from_all_remaining_segment_metadata() -> None:
+    oversized_status = "S" * 249
+    result = segment_markdown(
+        markdown_source(
+            f"---\nid: ADR-BOUNDED\nstatus: {oversized_status}\n---\n"
+            "# Decision\n\nPublish events.\n\n"
+            "- Keep ordering.\n\n"
+            "```mermaid\nCheckout --> Orders\n```\n"
+        ),
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=CONTEXT.tool_version,
+            max_segment_chars=256,
+        ),
+    )
+
+    assert not any(
+        segment["segment_kind"] == "metadata_field"
+        and segment["metadata"]["metadata_key"] == "status"
+        for segment in result.segments
+    )
+    assert all(
+        segment["metadata"].get("adr_id") == "ADR-BOUNDED"
+        for segment in result.segments
+    )
+    assert all(
+        segment["metadata"].get("adr_status") is None
+        for segment in result.segments
+    )
+    assert [warning["code"] for warning in result.warnings] == [
+        "segment_too_large"
+    ]
+
+
+def test_supported_metadata_field_at_exact_bound_remains_effective() -> None:
+    exact_id = "I" * 252
+    result = segment_markdown(
+        markdown_source(
+            f"---\nid: {exact_id}\nstatus: accepted\n---\n"
+            "# Decision\n\nPublish events.\n"
+        ),
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=CONTEXT.tool_version,
+            max_segment_chars=256,
+        ),
+    )
+
+    id_field = next(
+        segment
+        for segment in result.segments
+        if segment["segment_kind"] == "metadata_field"
+        and segment["metadata"]["metadata_key"] == "id"
+    )
+    assert len(id_field["text"]) == 256
+    assert id_field["metadata"]["metadata_value"] == exact_id
+    assert all(
+        segment["metadata"].get("adr_id") == exact_id
+        for segment in result.segments
+    )
+    assert result.warnings == ()
+
+
+def test_oversized_multiline_metadata_scalar_is_warning_only() -> None:
+    multiline_id = "I" * 248
+    result = segment_markdown(
+        markdown_source(
+            f"---\nid: >-\n  {multiline_id}\nstatus: accepted\n---\n"
+            "# Decision\n\nPublish events.\n"
+        ),
+        IngestionContext(
+            configuration_digest=CONTEXT.configuration_digest,
+            pipeline_digest=CONTEXT.pipeline_digest,
+            tool_version=CONTEXT.tool_version,
+            max_segment_chars=256,
+        ),
+    )
+
+    assert not any(
+        segment["segment_kind"] == "metadata_field"
+        and segment["metadata"]["metadata_key"] == "id"
+        for segment in result.segments
+    )
+    assert all(
+        segment["metadata"].get("adr_id") is None
+        for segment in result.segments
+    )
+    assert [warning["span"] for warning in result.warnings] == [
+        {
+            "start_line": 2,
+            "end_line": 4,
+            "start_column": 1,
+            "end_column": 1,
+        }
+    ]
+    assert all(
+        segment["metadata"].get("adr_status") == "accepted"
+        for segment in result.segments
+    )

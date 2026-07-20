@@ -274,12 +274,14 @@ def segment_markdown(
     paragraph: list[tuple[int, str]] = []
     diagram_derivations: dict[str, Record] = {}
 
+    oversized_metadata: set[str] = set()
     for key in SUPPORTED_METADATA:
         if key not in metadata or key not in metadata_spans:
             continue
         span = metadata_spans[key]
         evidence_text = exact_source_excerpt(source, span)
         if len(evidence_text) > context.max_segment_chars:
+            oversized_metadata.add(key)
             warnings.append(
                 warning_record(
                     source,
@@ -293,7 +295,17 @@ def segment_markdown(
                     derivation_ids=(derivation_id,),
                 )
             )
+
+    effective_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key not in oversized_metadata
+    }
+    for key in SUPPORTED_METADATA:
+        if key not in effective_metadata or key not in metadata_spans:
             continue
+        span = metadata_spans[key]
+        evidence_text = exact_source_excerpt(source, span)
         segment, item_evidence = segment_and_evidence(
             source,
             segment_kind="metadata_field",
@@ -304,9 +316,9 @@ def segment_markdown(
             metadata={
                 "section_role": "status" if key == "status" else "context",
                 "metadata_key": key,
-                "metadata_value": metadata[key],
-                "adr_id": metadata.get("id"),
-                "adr_status": metadata.get("status"),
+                "metadata_value": effective_metadata[key],
+                "adr_id": effective_metadata.get("id"),
+                "adr_status": effective_metadata.get("status"),
             },
             derivation_ids=(derivation_id,),
             ordinal=len(segments),
@@ -314,22 +326,26 @@ def segment_markdown(
         segments.append(segment)
         evidence.append(item_evidence)
 
-    def heading_path() -> list[str]:
-        remaining = context.max_segment_chars
-        bounded: list[str] = []
-        for _, title in heading_levels:
-            if remaining <= 0:
+    def retained_heading_levels() -> list[tuple[int, str]]:
+        retained: list[tuple[int, str]] = []
+        size = 0
+        for item in reversed(heading_levels):
+            item_size = len(item[1])
+            if size + item_size > context.max_segment_chars:
                 break
-            selected = title[:remaining]
-            if selected:
-                bounded.append(selected)
-                remaining -= len(selected)
-        return bounded
+            retained.append(item)
+            size += item_size
+        retained.reverse()
+        return retained
+
+    def heading_path() -> list[str]:
+        return [title for _, title in retained_heading_levels()]
 
     def section_role() -> str:
-        if not heading_levels:
+        retained = retained_heading_levels()
+        if not retained:
             return "context"
-        return SECTION_ROLES.get(heading_levels[-1][1].strip().casefold(), "context")
+        return SECTION_ROLES.get(retained[-1][1].strip().casefold(), "context")
 
     def emit_paragraph() -> None:
         if not paragraph:
@@ -349,8 +365,8 @@ def segment_markdown(
                 heading_path=heading_path(),
                 metadata={
                     "section_role": section_role(),
-                    "adr_id": metadata.get("id"),
-                    "adr_status": metadata.get("status"),
+                    "adr_id": effective_metadata.get("id"),
+                    "adr_status": effective_metadata.get("status"),
                 },
                 derivation_ids=(derivation_id,),
                 ordinal=len(segments),
@@ -399,6 +415,8 @@ def segment_markdown(
                     (derivation_id, diagram_id),
                     len(segments),
                     context.max_segment_chars,
+                    effective_metadata.get("id"),
+                    effective_metadata.get("status"),
                 )
                 diagram_derivations[diagram_id] = diagram_derivation
                 segments.extend(result.segments)
@@ -427,8 +445,12 @@ def segment_markdown(
             title = heading.group(2).strip()
             heading_levels = [item for item in heading_levels if item[0] < level]
             heading_levels.append((level, title))
-            path_size = sum(len(item[1]) for item in heading_levels)
-            if max(path_size, len(title), len(raw)) > context.max_segment_chars:
+            path_is_bounded = retained_heading_levels() == heading_levels
+            heading_is_bounded = (
+                len(title) <= context.max_segment_chars
+                and len(raw) <= context.max_segment_chars
+            )
+            if not path_is_bounded or not heading_is_bounded:
                 warnings.append(
                     warning_record(
                         source,
@@ -439,7 +461,7 @@ def segment_markdown(
                         derivation_ids=(derivation_id,),
                     )
                 )
-            else:
+            if heading_is_bounded:
                 segment, item_evidence = segment_and_evidence(
                     source,
                     segment_kind="heading",
@@ -452,8 +474,8 @@ def segment_markdown(
                     metadata={
                         "section_role": section_role(),
                         "heading_level": level,
-                        "adr_id": metadata.get("id"),
-                        "adr_status": metadata.get("status"),
+                        "adr_id": effective_metadata.get("id"),
+                        "adr_status": effective_metadata.get("status"),
                     },
                     derivation_ids=(derivation_id,),
                     ordinal=len(segments),

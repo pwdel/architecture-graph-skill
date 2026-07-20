@@ -165,6 +165,8 @@ def diagram_statement_records(
     derivation_ids: Sequence[str],
     ordinal_start: int,
     max_segment_chars: int,
+    adr_id: object | None,
+    adr_status: object | None,
 ) -> IngestionResult:
     segments: list[Record] = []
     evidence: list[Record] = []
@@ -274,6 +276,8 @@ def diagram_statement_records(
                     "diagram_language": language,
                     "content_role": "diagram",
                     "section_role": section_role,
+                    "adr_id": adr_id,
+                    "adr_status": adr_status,
                 },
                 derivation_ids=derivation_ids,
                 ordinal=ordinal_start + len(segments),
