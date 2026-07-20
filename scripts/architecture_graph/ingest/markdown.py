@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import re
 import unicodedata
 
@@ -61,29 +62,62 @@ class FrontMatterError(ValueError):
     pass
 
 
-def _validate_yaml_node(node: Node) -> None:
-    if isinstance(node, MappingNode):
-        seen: dict[str, str] = {}
-        for key_node, value_node in node.value:
-            if not isinstance(key_node, ScalarNode) or key_node.tag != YAML_STRING_TAG:
-                raise FrontMatterError(
-                    "front matter mapping keys must be string scalars"
-                )
-            key = key_node.value
-            normalized = unicodedata.normalize("NFKC", key)
-            if normalized in seen:
-                previous = seen[normalized]
-                if previous == key:
-                    raise FrontMatterError(f"duplicate front matter key: {key}")
-                raise FrontMatterError(
-                    "normalized front matter key collision: "
-                    f"{previous!r} and {key!r}"
-                )
-            seen[normalized] = key
-            _validate_yaml_node(value_node)
-    elif isinstance(node, SequenceNode):
-        for item in node.value:
-            _validate_yaml_node(item)
+def _validate_yaml_node(node: Node, active: set[int] | None = None) -> None:
+    active = set() if active is None else active
+    identity = id(node)
+    if identity in active:
+        raise FrontMatterError("recursive YAML alias in front matter")
+    active.add(identity)
+    try:
+        if isinstance(node, MappingNode):
+            seen: dict[str, str] = {}
+            for key_node, value_node in node.value:
+                if (
+                    not isinstance(key_node, ScalarNode)
+                    or key_node.tag != YAML_STRING_TAG
+                ):
+                    raise FrontMatterError(
+                        "front matter mapping keys must be string scalars"
+                    )
+                key = key_node.value
+                normalized = unicodedata.normalize("NFKC", key)
+                if normalized in seen:
+                    previous = seen[normalized]
+                    if previous == key:
+                        raise FrontMatterError(f"duplicate front matter key: {key}")
+                    raise FrontMatterError(
+                        "normalized front matter key collision: "
+                        f"{previous!r} and {key!r}"
+                    )
+                seen[normalized] = key
+                _validate_yaml_node(value_node, active)
+        elif isinstance(node, SequenceNode):
+            for item in node.value:
+                _validate_yaml_node(item, active)
+    finally:
+        active.remove(identity)
+
+
+def _reject_recursive_containers(
+    value: object, active: set[int] | None = None
+) -> None:
+    if isinstance(value, Mapping):
+        children = value.values()
+    elif isinstance(value, (list, tuple)):
+        children = value
+    else:
+        return
+
+    active = set() if active is None else active
+    identity = id(value)
+    if identity in active:
+        raise FrontMatterError("recursive YAML value in front matter")
+    active.add(identity)
+    try:
+        for child in children:
+            _reject_recursive_containers(child, active)
+    finally:
+        active.remove(identity)
 
 
 def _parse_front_matter(
@@ -96,8 +130,11 @@ def _parse_front_matter(
     loaded = yaml.safe_load(raw_metadata)
     if not isinstance(loaded, dict):
         raise FrontMatterError("front matter must be a mapping")
+    _reject_recursive_containers(loaded)
     try:
         canonicalize(loaded)
+    except RecursionError as error:
+        raise FrontMatterError("recursive YAML value in front matter") from error
     except (TypeError, ValueError) as error:
         raise FrontMatterError(
             f"front matter values must be canonical JSON: {error}"

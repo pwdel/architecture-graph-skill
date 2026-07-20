@@ -51,6 +51,25 @@ def test_invalid_front_matter_warns_without_emitting_records(
     assert message_fragment in str(result.warnings[0]["message"])
 
 
+def test_recursive_yaml_alias_warns_without_emitting_records() -> None:
+    result = segment_markdown(
+        markdown_source(
+            "---\n"
+            "id: &loop [*loop]\n"
+            "status: accepted\n"
+            "---\n"
+            "# Ignored after recursive metadata\n"
+        )
+    )
+
+    assert result.segments == ()
+    assert result.evidence == ()
+    assert [warning["code"] for warning in result.warnings] == [
+        "unsupported_construct"
+    ]
+    assert "recursive" in str(result.warnings[0]["message"])
+
+
 def test_commonmark_list_markers_emit_one_segment_per_item() -> None:
     result = segment_markdown(
         markdown_source(
