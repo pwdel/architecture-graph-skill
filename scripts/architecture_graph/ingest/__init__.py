@@ -6,6 +6,14 @@ from architecture_graph.records import Record
 
 
 @dataclass(frozen=True)
+class IngestionContext:
+    configuration_digest: str
+    pipeline_digest: str
+    tool_version: str
+    max_segment_chars: int = 8_000
+
+
+@dataclass(frozen=True)
 class IngestionResult:
     segments: tuple[Record, ...] = ()
     evidence: tuple[Record, ...] = ()

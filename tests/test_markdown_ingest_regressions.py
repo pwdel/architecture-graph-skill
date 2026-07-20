@@ -5,8 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from architecture_graph.ingest import IngestionContext
 from architecture_graph.ingest.markdown import segment_markdown
 from architecture_graph.sources import SourceInput
+
+
+CONTEXT = IngestionContext(
+    configuration_digest="sha256:" + ("a" * 64),
+    pipeline_digest="sha256:" + ("b" * 64),
+    tool_version="0.1.0",
+)
 
 
 def markdown_source(text: str) -> SourceInput:
@@ -36,41 +44,51 @@ def markdown_source(text: str) -> SourceInput:
         ("id: 2026-07-20\nstatus: accepted", "canonical JSON"),
     ],
 )
-def test_invalid_front_matter_warns_without_emitting_records(
+def test_invalid_front_matter_warns_and_recovers_body_without_metadata(
     front_matter: str, message_fragment: str
 ) -> None:
     result = segment_markdown(
-        markdown_source(f"---\n{front_matter}\n---\n# Ignored after invalid metadata\n")
+        markdown_source(f"---\n{front_matter}\n---\n# Recovered after invalid metadata\n"),
+        CONTEXT,
     )
 
-    assert result.segments == ()
-    assert result.evidence == ()
+    assert [
+        segment["text"]
+        for segment in result.segments
+        if segment["segment_kind"] == "heading"
+    ] == ["Recovered after invalid metadata"]
+    assert not any(
+        segment["segment_kind"] == "metadata_field"
+        for segment in result.segments
+    )
     assert [warning["code"] for warning in result.warnings] == [
         "unsupported_construct"
     ]
     assert message_fragment in str(result.warnings[0]["message"])
 
 
-def test_recursive_yaml_alias_warns_without_emitting_records() -> None:
+def test_recursive_yaml_alias_warns_and_recovers_body_without_metadata() -> None:
     result = segment_markdown(
         markdown_source(
             "---\n"
             "id: &loop [*loop]\n"
             "status: accepted\n"
             "---\n"
-            "# Ignored after recursive metadata\n"
-        )
+            "# Recovered after recursive metadata\n"
+        ),
+        CONTEXT,
     )
 
-    assert result.segments == ()
-    assert result.evidence == ()
+    assert [segment["text"] for segment in result.segments] == [
+        "Recovered after recursive metadata"
+    ]
     assert [warning["code"] for warning in result.warnings] == [
         "unsupported_construct"
     ]
     assert "recursive" in str(result.warnings[0]["message"])
 
 
-def test_shared_acyclic_yaml_alias_warns_without_emitting_records() -> None:
+def test_shared_acyclic_yaml_alias_warns_and_recovers_body_without_metadata() -> None:
     source = markdown_source(
         "---\n"
         "defaults: &base {region: us}\n"
@@ -79,14 +97,15 @@ def test_shared_acyclic_yaml_alias_warns_without_emitting_records() -> None:
         "id: ADR-ALIASES\n"
         "status: accepted\n"
         "---\n"
-        "# Ignored after aliased metadata\n"
+        "# Recovered after aliased metadata\n"
     )
 
-    first = segment_markdown(source)
-    second = segment_markdown(source)
+    first = segment_markdown(source, CONTEXT)
+    second = segment_markdown(source, CONTEXT)
 
-    assert first.segments == ()
-    assert first.evidence == ()
+    assert [segment["text"] for segment in first.segments] == [
+        "Recovered after aliased metadata"
+    ]
     assert [warning["code"] for warning in first.warnings] == [
         "unsupported_construct"
     ]
@@ -106,7 +125,8 @@ def test_nested_yaml_without_aliases_remains_supported() -> None:
             "    - central\n"
             "---\n"
             "# Nested metadata\n"
-        )
+        ),
+        CONTEXT,
     )
 
     assert result.warnings == ()
@@ -126,7 +146,8 @@ def test_commonmark_list_markers_emit_one_segment_per_item() -> None:
             "* star\n"
             "1. ordered dot\n"
             "2) ordered parenthesis\n"
-        )
+        ),
+        CONTEXT,
     )
 
     items = [
@@ -144,7 +165,8 @@ def test_commonmark_list_markers_emit_one_segment_per_item() -> None:
 
 def test_list_markers_require_following_whitespace() -> None:
     result = segment_markdown(
-        markdown_source("-not\n+not\n*not\n1.not\n2)not\n")
+        markdown_source("-not\n+not\n*not\n1.not\n2)not\n"),
+        CONTEXT,
     )
 
     assert not any(
@@ -168,7 +190,8 @@ def test_evidence_preserves_exact_source_slices_and_exclusive_columns() -> None:
             "```mermaid\r\n"
             "   A --> B   \r\n"
             "```\r\n"
-        )
+        ),
+        CONTEXT,
     )
 
     evidence_by_segment = {
@@ -228,7 +251,8 @@ def test_mermaid_compound_line_splits_into_exact_statement_spans() -> None:
     result = segment_markdown(
         markdown_source(
             "# Diagram\n\n```mermaid\n  A --> B; B --> C  \n```\n"
-        )
+        ),
+        CONTEXT,
     )
 
     statements = [
@@ -267,7 +291,8 @@ def test_unsplittable_mermaid_compound_fails_closed_with_warning() -> None:
     result = segment_markdown(
         markdown_source(
             "# Diagram\n\n```mermaid\nA --> B B --> C\n```\n"
-        )
+        ),
+        CONTEXT,
     )
 
     assert not any(
@@ -277,3 +302,23 @@ def test_unsplittable_mermaid_compound_fails_closed_with_warning() -> None:
     assert [warning["code"] for warning in result.warnings] == [
         "unsupported_construct"
     ]
+
+
+def test_unclosed_front_matter_returns_only_warning_and_derivation() -> None:
+    result = segment_markdown(
+        markdown_source(
+            "---\n"
+            "id: ADR-UNCLOSED\n"
+            "status: accepted\n"
+            "# Must not be recovered without a closing delimiter\n"
+        ),
+        CONTEXT,
+    )
+
+    assert result.segments == ()
+    assert result.evidence == ()
+    assert len(result.derivations) == 1
+    assert [warning["code"] for warning in result.warnings] == [
+        "unsupported_construct"
+    ]
+    assert "closing delimiter not found" in str(result.warnings[0]["message"])

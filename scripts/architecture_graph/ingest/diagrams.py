@@ -4,12 +4,11 @@ from collections.abc import Sequence
 import re
 
 from architecture_graph.canonical import stable_id
-from architecture_graph.ingest import IngestionResult
+from architecture_graph.ingest import IngestionContext, IngestionResult
 from architecture_graph.records import Record, SourceSpan, finalize_record
 from architecture_graph.sources import SourceInput, source_record_id
 
 
-CHECKPOINT_DIGEST = "sha256:" + ("0" * 64)
 ARROW = re.compile(r"<--|-->|\.\.>|->")
 
 
@@ -41,15 +40,17 @@ def exact_source_excerpt(source: SourceInput, span: SourceSpan) -> str:
     return source.text[start_offset:end_offset]
 
 
-def derivation_record(source: SourceInput, method: str) -> Record:
+def derivation_record(
+    source: SourceInput, method: str, context: IngestionContext
+) -> Record:
     source_id = source_record_id(source)
     derivation_id = stable_id(
         "derivation",
         "deterministic",
         method,
-        "v1",
-        CHECKPOINT_DIGEST,
-        CHECKPOINT_DIGEST,
+        context.tool_version,
+        context.configuration_digest,
+        context.pipeline_digest,
         source_id,
         "segment_set",
         source_id,
@@ -61,12 +62,12 @@ def derivation_record(source: SourceInput, method: str) -> Record:
             "producer_kind": "deterministic",
             "method": method,
             "tool": "architecture-graph",
-            "tool_version": "0.1.0",
+            "tool_version": context.tool_version,
             "model": None,
             "model_version": None,
             "model_artifact_digest": None,
-            "configuration_digest": CHECKPOINT_DIGEST,
-            "pipeline_digest": CHECKPOINT_DIGEST,
+            "configuration_digest": context.configuration_digest,
+            "pipeline_digest": context.pipeline_digest,
             "input_ids": [source_id],
             "output_kind": "segment_set",
             "output_identity_key": source_id,
@@ -79,17 +80,18 @@ def segment_and_evidence(
     source: SourceInput,
     *,
     segment_kind: str,
-    text: str,
+    segment_text: str,
     evidence_text: str,
     span: SourceSpan,
     heading_path: Sequence[str],
     metadata: dict[str, object],
-    derivation_id: str,
+    derivation_ids: Sequence[str],
     ordinal: int,
 ) -> tuple[Record, Record]:
     if evidence_text != exact_source_excerpt(source, span):
         raise ValueError("evidence text does not match its exact source span")
     source_id = source_record_id(source)
+    canonical_derivations = sorted(set(derivation_ids))
     segment_id = stable_id(
         "segment", source_id, segment_kind, list(heading_path), ordinal, span.as_record()
     )
@@ -108,11 +110,11 @@ def segment_and_evidence(
             "segment_kind": segment_kind,
             "heading_path": list(heading_path),
             "ordinal": ordinal,
-            "text": text,
+            "text": segment_text,
             "span": span.as_record(),
             "metadata": metadata,
             "evidence_ids": [evidence_id],
-            "derivation_ids": [derivation_id],
+            "derivation_ids": canonical_derivations,
         }
     )
     evidence = finalize_record(
@@ -125,7 +127,7 @@ def segment_and_evidence(
             "source_content_hash": source.content_hash,
             "span": span.as_record(),
             "text": evidence_text,
-            "derivation_ids": [derivation_id],
+            "derivation_ids": canonical_derivations,
         }
     )
     return segment, evidence
@@ -138,7 +140,7 @@ def warning_record(
     message: str,
     span: SourceSpan | None,
     possible_role: str | None,
-    derivation_id: str,
+    derivation_ids: Sequence[str],
 ) -> Record:
     return finalize_record(
         {
@@ -149,7 +151,7 @@ def warning_record(
             "source_version_id": source_record_id(source),
             "span": None if span is None else span.as_record(),
             "possible_role": possible_role,
-            "derivation_ids": [derivation_id],
+            "derivation_ids": sorted(set(derivation_ids)),
         }
     )
 
@@ -160,8 +162,9 @@ def diagram_statement_records(
     lines: Sequence[tuple[int, str]],
     heading_path: Sequence[str],
     section_role: str,
-    derivation_id: str,
+    derivation_ids: Sequence[str],
     ordinal_start: int,
+    max_segment_chars: int,
 ) -> IngestionResult:
     segments: list[Record] = []
     evidence: list[Record] = []
@@ -238,17 +241,32 @@ def diagram_statement_records(
                     message="unsplittable compound Mermaid statement",
                     span=SourceSpan(line_number, line_number, 1, len(raw) + 1),
                     possible_role=section_role,
-                    derivation_id=derivation_id,
+                    derivation_ids=derivation_ids,
                 )
             )
             continue
         for start, end in candidates:
             statement = raw[start:end]
             span = SourceSpan(line_number, line_number, start + 1, end + 1)
+            if len(statement) > max_segment_chars:
+                warnings.append(
+                    warning_record(
+                        source,
+                        code="segment_too_large",
+                        message=(
+                            f"{language} statement exceeds max_segment_chars "
+                            f"at line {line_number}"
+                        ),
+                        span=span,
+                        possible_role=section_role,
+                        derivation_ids=derivation_ids,
+                    )
+                )
+                continue
             segment, item_evidence = segment_and_evidence(
                 source,
                 segment_kind="diagram_statement",
-                text=statement,
+                segment_text=statement,
                 evidence_text=statement,
                 span=span,
                 heading_path=heading_path,
@@ -257,7 +275,7 @@ def diagram_statement_records(
                     "content_role": "diagram",
                     "section_role": section_role,
                 },
-                derivation_id=derivation_id,
+                derivation_ids=derivation_ids,
                 ordinal=ordinal_start + len(segments),
             )
             segments.append(segment)
