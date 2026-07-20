@@ -8416,7 +8416,9 @@ replaces `manifest.json` and `sources.jsonl`, separately, immediately after
 their image helper returns but before parsing: the first validation consumes
 the returned original bytes and succeeds, while the next open or iteration
 rejects the canonical on-disk substitute. Both borrowed-storage and one-shot
-compatibility readers run this matrix.
+compatibility readers run this matrix. Spies on `ProjectStorage.open_regular`
+and its descriptor-relative `os.open` require one target open during the first
+integrity pass and a second only for the deliberate rejection.
 
 The first executable line in `publish_snapshot()` is
 `_validated_observation(initial_observation)`; only then may it call
@@ -11453,7 +11455,31 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
         substitute_image = canonical_bytes(substitute)
     replacement = snapshot_dir / f".{target_name}.substitute"
     real_read = snapshot_module._read_snapshot_file_image
+    real_open_regular = ProjectStorage.open_regular
+    real_os_open = os.open
     swapped = False
+    target_storage_opens = 0
+    target_descriptor_opens = 0
+
+    def count_target_storage_open(
+        self, components, flags, mode=0o600
+    ):
+        nonlocal target_storage_opens
+        if tuple(components)[-1:] == (target_name,):
+            target_storage_opens += 1
+        return real_open_regular(self, components, flags, mode)
+
+    def count_target_descriptor_open(
+        path, flags, mode=0o777, *, dir_fd=None
+    ):
+        nonlocal target_descriptor_opens
+        if (
+            dir_fd is not None
+            and isinstance(path, (str, bytes, os.PathLike))
+            and Path(os.fsdecode(path)).name == target_name
+        ):
+            target_descriptor_opens += 1
+        return real_os_open(path, flags, mode, dir_fd=dir_fd)
 
     def acquire_then_swap(storage, snapshot_id, name):
         nonlocal swapped
@@ -11469,12 +11495,20 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
         "_read_snapshot_file_image",
         acquire_then_swap,
     )
+    monkeypatch.setattr(
+        ProjectStorage,
+        "open_regular",
+        count_target_storage_open,
+    )
+    monkeypatch.setattr(os, "open", count_target_descriptor_open)
 
     def exercise(storage: ProjectStorage | None) -> None:
         reader = SnapshotReader.open(
             project, result.snapshot_id, storage=storage
         )
         assert swapped is True
+        assert target_storage_opens == 1
+        assert target_descriptor_opens == 1
         if target_name == "manifest.json":
             with pytest.raises(ValueError, match="manifest|snapshot"):
                 SnapshotReader.open(
@@ -11485,6 +11519,8 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
             with pytest.raises(ValueError, match="snapshot integrity"):
                 yielded.extend(reader.iter("sources"))
             assert yielded == []
+        assert target_storage_opens == 2
+        assert target_descriptor_opens == 2
 
     if borrowed:
         with ProjectStorage(project, create=False) as storage:
@@ -12566,7 +12602,7 @@ The focused acceptance matrix must include:
 | Manifest-authoritative continuity | repeated configured-untracked and staged-add Git facts cannot promote unchanged paths during an unrelated deletion; genuine dirty additions remain candidates; an unchanged equal-byte local path retains continuity while the isolated new/old pair moves |
 | Project identity Git read | non-UTF-8 remote, executable failure, and non-optional Git failure become `RepositoryStateError`; normalized remote/project ID are captured in the stable token and a late remote change cannot fork history |
 | Memory storage boundary | direct in-repository roots, root redirects, redirected/file-valued project entries, and every reserved-component redirect or wrong type fail closed; file-valued and simulated unwritable roots return 2 with empty stdout, one diagnostic, and no pre-commit pointer mutation in human and JSON modes |
-| Anchored reader/open | borrowed and compatibility readers survive atomic manifest/payload swaps only by parsing the acquired image; snapshot-owned path/hash and absolute raw opens fail; substitution, lifecycle, FD, and FIFO cases remain covered |
+| Anchored reader/open | borrowed and compatibility readers open each target once per integrity pass and survive atomic manifest/payload swaps only by parsing that image; snapshot-owned path/hash and absolute raw opens fail; substitution, lifecycle, FD, and FIFO cases remain covered |
 | Selected-state CAS | pointer-only same-snapshot observation winners conflict, and changing only the canonical selected observation row while keeping `current.json` byte-identical conflicts before the guard or durable publication |
 | Late repository guard | source mutation after real staging, immutable reuse validation, or complete ledger preparation fails with unchanged ledger/pointer and cleaned temporary state |
 | Reuse result preflight | source, segment, and warning counts all materialize before final validation or observation publication; an injected count `OSError` preserves ledger/pointer and CLI framing |
