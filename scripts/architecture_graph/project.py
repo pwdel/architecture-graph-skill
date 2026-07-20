@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import fcntl
 import hashlib
 import os
 from pathlib import Path
 import subprocess
 from urllib.parse import urlsplit, urlunsplit
+
+from architecture_graph.canonical import sha256_digest
+from architecture_graph.records import JSONValue
 
 
 def _git(root: Path, *args: str, check: bool = True) -> str:
@@ -41,6 +47,43 @@ def project_id(root: Path) -> str:
     remote = _git(resolved, "config", "--get", "remote.origin.url", check=False)
     identity = f"{normalize_remote(remote)}\n{resolved.as_posix()}".encode("utf-8")
     return hashlib.sha256(identity).hexdigest()
+
+
+class ProjectLock(AbstractContextManager["ProjectLock"]):
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle = None
+
+    def __enter__(self) -> "ProjectLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self.path.open("a+")
+        fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if self._handle is not None:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            self._handle.close()
+            self._handle = None
+
+
+def capture_git_observation(
+    root: Path, observed_at: str | None = None
+) -> dict[str, JSONValue]:
+    branch = _git(root, "symbolic-ref", "--short", "-q", "HEAD", check=False) or None
+    commit = _git(root, "rev-parse", "HEAD", check=False) or None
+    dirty = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain=v2", "-z"],
+        check=True,
+        capture_output=True,
+    ).stdout
+    timestamp = observed_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "branch": branch,
+        "commit": commit,
+        "dirty_fingerprint": sha256_digest(dirty),
+        "observed_at": timestamp,
+    }
 
 
 @dataclass(frozen=True)
