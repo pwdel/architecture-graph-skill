@@ -8366,7 +8366,8 @@ this helper. Delete the old `_file_digest(path)`-then-reopen parse sequence.
 Snapshot-owned validation must not call `_file_digest`, `Path.open`,
 `Path.read_bytes`, `Path.read_text`, a bare built-in path open, or an absolute
 `os.open`/`io.open`; every hash and parser input comes from one anchored byte
-image:
+image. A scoped `sys.addaudithook` guard rejects snapshot-owned absolute open
+events even when production code cached an opener alias before monkeypatching:
 
 ```python
 def _validate_snapshot_payloads(
@@ -11535,6 +11536,7 @@ def test_snapshot_validation_never_reopens_snapshot_owned_paths(
 ) -> None:
     import builtins
     import io
+    import sys
     import architecture_graph.snapshot as snapshot_module
 
     memory = tmp_path / "memory"
@@ -11549,6 +11551,8 @@ def test_snapshot_validation_never_reopens_snapshot_owned_paths(
     real_path_open = Path.open
     real_read_bytes = Path.read_bytes
     real_read_text = Path.read_text
+    audit_active = False
+    audit_open_events = 0
 
     def is_snapshot_owned(value: object) -> bool:
         if not isinstance(value, (str, bytes, os.PathLike)):
@@ -11592,6 +11596,16 @@ def test_snapshot_validation_never_reopens_snapshot_owned_paths(
             raise AssertionError("snapshot Path.read_text is forbidden")
         return real_read_text(path, *args, **kwargs)
 
+    def reject_snapshot_audit_open(event, args):
+        nonlocal audit_open_events
+        if not audit_active or event != "open" or not args:
+            return
+        audit_open_events += 1
+        if is_snapshot_owned(args[0]):
+            raise AssertionError(
+                "snapshot-owned absolute open reached the audit boundary"
+            )
+
     monkeypatch.setattr(
         snapshot_module, "_file_digest", reject_file_digest, raising=False
     )
@@ -11601,15 +11615,27 @@ def test_snapshot_validation_never_reopens_snapshot_owned_paths(
     monkeypatch.setattr(Path, "open", reject_path_open)
     monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
     monkeypatch.setattr(Path, "read_text", reject_read_text)
-    if borrowed:
-        with ProjectStorage(project, create=False) as storage:
-            reader = SnapshotReader.open(
-                project, result.snapshot_id, storage=storage
-            )
+    sys.addaudithook(reject_snapshot_audit_open)
+    audit_active = True
+    try:
+        with pytest.raises(AssertionError, match="audit boundary"):
+            real_io_open(snapshot_dir / "manifest.json", "rb")
+        with pytest.raises(AssertionError, match="audit boundary"):
+            io.FileIO(snapshot_dir / "manifest.json", "r")
+        if borrowed:
+            with ProjectStorage(project, create=False) as storage:
+                reader = SnapshotReader.open(
+                    project, result.snapshot_id, storage=storage
+                )
+                assert list(reader.iter("sources"))
+        else:
+            reader = SnapshotReader.open(project, result.snapshot_id)
             assert list(reader.iter("sources"))
-    else:
-        reader = SnapshotReader.open(project, result.snapshot_id)
-        assert list(reader.iter("sources"))
+    finally:
+        audit_active = False
+    assert audit_open_events >= 2
+    with real_io_open(snapshot_dir / "manifest.json", "rb") as handle:
+        assert handle.read(1)
 
 
 def test_selected_observation_row_is_part_of_publication_cas(
@@ -12602,7 +12628,7 @@ The focused acceptance matrix must include:
 | Manifest-authoritative continuity | repeated configured-untracked and staged-add Git facts cannot promote unchanged paths during an unrelated deletion; genuine dirty additions remain candidates; an unchanged equal-byte local path retains continuity while the isolated new/old pair moves |
 | Project identity Git read | non-UTF-8 remote, executable failure, and non-optional Git failure become `RepositoryStateError`; normalized remote/project ID are captured in the stable token and a late remote change cannot fork history |
 | Memory storage boundary | direct in-repository roots, root redirects, redirected/file-valued project entries, and every reserved-component redirect or wrong type fail closed; file-valued and simulated unwritable roots return 2 with empty stdout, one diagnostic, and no pre-commit pointer mutation in human and JSON modes |
-| Anchored reader/open | borrowed and compatibility readers open each target once per integrity pass and survive atomic manifest/payload swaps only by parsing that image; snapshot-owned path/hash and absolute raw opens fail; substitution, lifecycle, FD, and FIFO cases remain covered |
+| Anchored reader/open | borrowed and compatibility readers open each target once per integrity pass and survive atomic manifest/payload swaps only by parsing that image; monkeypatch and audit-hook guards reject snapshot-owned path/hash, absolute raw, cached-alias, and `FileIO` opens; substitution, lifecycle, FD, and FIFO cases remain covered |
 | Selected-state CAS | pointer-only same-snapshot observation winners conflict, and changing only the canonical selected observation row while keeping `current.json` byte-identical conflicts before the guard or durable publication |
 | Late repository guard | source mutation after real staging, immutable reuse validation, or complete ledger preparation fails with unchanged ledger/pointer and cleaned temporary state |
 | Reuse result preflight | source, segment, and warning counts all materialize before final validation or observation publication; an injected count `OSError` preserves ledger/pointer and CLI framing |
