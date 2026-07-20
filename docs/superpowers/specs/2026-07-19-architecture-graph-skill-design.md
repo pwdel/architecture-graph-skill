@@ -808,7 +808,9 @@ Default durable memory layout:
     reviews.jsonl
 ~~~
 
-The project identifier hashes the normalized remote URL and repository root so same-named repositories do not collide.
+The project identifier hashes the normalized remote URL and repository root so same-named repositories do not collide. Every stable repository capture includes both the normalized remote and derived project identifier. Project storage is selected from that captured identity, not from a second remote read, and the final repository guard rederives both values; a remote change therefore fails the run instead of forking one repository into disconnected project histories. Each Git observation also reads branch and commit both before and after its stable dirty-state capture and rejects a changed HEAD, so those fields always describe one coherent repository window.
+
+The resolved project directory must remain beneath the resolved memory root and outside the resolved source repository, whether the memory root came from an argument, environment, or default. Existing project, staging, snapshots, reviews, and cache entries must be actual directories. Existing lock, current-pointer, observation-ledger, and project-metadata entries must be regular files. Symlinks and all other path types fail before project-state access. Phase 1 enforces this with one POSIX project-directory context anchored by directory descriptors: it walks actual directories with `O_DIRECTORY | O_NOFOLLOW`, opens regular files with `O_NOFOLLOW | O_NONBLOCK` followed by an `fstat` type check, and performs temporary creation, replacement, staging install, cleanup, and locking by relative name with `dir_fd`. This is a narrow storage boundary for project-owned files, not a general virtual filesystem, and adds no dependency.
 
 Each manifest identifies:
 
@@ -868,7 +870,7 @@ Canonical serialization uses:
 
 JSON Lines supports record-at-a-time processing and Unix-style pipelines.
 
-PROJECT.json, current.json, and manifest.json remain small standard JSON documents. current.json contains the selected snapshot identifier, latest observation identifier, and publication metadata.
+PROJECT.json, current.json, and manifest.json remain small standard JSON documents. current.json contains exactly schema version, selected snapshot identifier, latest observation identifier, and publication time. Readers require canonical bytes and `type(schema_version) is int` with value 1. The selected state consists of both the complete canonical pointer image and the exact canonical observation row it selects. Readers require exactly one matching row and validate its snapshot and publication time against the pointer. Publication revalidates both tokens under the project lock; changing only the selected row, observation identifier, or publication time for the same snapshot conflicts with a writer that captured the prior state.
 
 Human review files remain outside generated snapshots. A reviewed-snapshot finalization freezes the complete validated review ledger into reviews.jsonl and separately computes which records apply. Deterministic and enriched snapshots contain canonical empty review files. The reviewed manifest records the digest of that frozen review set; report.md remains content-only and does not repeat snapshot identity metadata.
 
@@ -901,6 +903,14 @@ SnapshotFinalizer.publish()
 AtomicJsonlLedger.append(path, record)
 ~~~
 
+SnapshotReader has no hidden descriptor ownership. Indexing explicitly lends it
+the live anchored project-storage context, which the reader never closes; use
+after that context closes is a deliberate error. Compatibility calls that omit
+the context open a one-shot anchored context for the complete open operation or
+JSONL-generator lifetime and close it before returning or exhausting the
+generator. `iter`, `get`, and `select` open snapshot payloads relative to the
+held project descriptor and never reopen a project-owned path by pathname.
+
 The implementation uses the small jsonlines package for record framing and streaming reads/writes; the canonical serializer supplies validation and deterministic key ordering. The Python standard library handles small manifest files. The ijson package remains an adapter dependency only if a future source format requires streaming a large nested JSON document.
 
 Writers target a temporary staging directory. Finalization:
@@ -911,7 +921,7 @@ Writers target a temporary staging directory. Finalization:
 4. deduplicates exact repeated records;
 5. sorts records by stable ID;
 6. acquires the project publication lock;
-7. compares the expected parent against current.json;
+7. rereads and validates current.json plus its uniquely selected observation row, then compares both complete canonical tokens and their absent/present shape with the expected selected state;
 8. for a reviewed snapshot, reads one locked byte image of the complete review ledger, validates it, sorts its records by stable ID, and freezes those exact canonical JSONL bytes plus their digest into staging;
 9. renders report.md from frozen, content-derived inputs;
 10. calculates the payload file-digest table;
@@ -921,7 +931,9 @@ Writers target a temporary staging directory. Finalization:
 14. publishes the observation record through the atomic ledger writer;
 15. atomically updates current.json with compare-and-swap semantics, selecting the snapshot and observation.
 
-A failed finalization leaves the previous current snapshot intact. A crash after step 14 may leave an unselected observation, which is safe: current.json remains authoritative and the next status command reports the orphan for repair.
+Phase 1 deterministic indexing tightens that generic sequence at its repository boundary. It validates the initial observation before staging. For changed material it completes and synchronizes staging, performs immutable collision verification, and removes a redundant collision stage before the final repository-token guard. For reuse it computes every result count first and revalidates the complete immutable snapshot under lock before the guard. Both branches parse, validate, and ID-index the complete observation ledger and copy its validated bytes to a synchronized anchored temporary file before the guard. The guard then rechecks source/configuration/Git/project-identity state and returns the final observation. After it, the publisher validates and serializes only that bounded row, appends it to the prepared file, installs a new snapshot when needed, and performs the project-metadata, ledger, and pointer replacements. No corpus or ledger parse/copy occurs after the guard.
+
+Pre-publication containment, count, read, validation, selected-state CAS, ledger-preparation, and final-guard failures leave both the observation ledger and current pointer unchanged. Once durable writes begin, an installed immutable snapshot or a failure after step 14 may leave an unselected snapshot or observation, which is safe because current.json remains authoritative. The `os.replace()` that installs `current.json` is the flat-file commit point. A failure before it preserves the old selection; a directory-sync or lock-release failure after a successful replace has an explicitly indeterminate committed/durability outcome, may already expose the new selection, and must not be blindly retried. `PublicationCommitUncertain` reports that uncertainty in the active command. A later status command can validate the state and report the selected pointer and any orphans it actually observes, but without a durable transaction marker it cannot reconstruct whether an earlier sync completed. The flat files do not pretend to provide a multi-file database transaction.
 
 Finalized snapshots are immutable. Indexing, LLM enrichment, and changed human review sets create new snapshots.
 
@@ -1077,7 +1089,7 @@ Source-version identity and logical-source identity remain separate:
 - repeated occurrences of one explicit identifier share that logical ID only when their content hashes match; the same identifier on different bytes fails before publication;
 - otherwise genesis hashes project identity, prior snapshot/genesis marker, relative path, and content hash, while each immutable source record carries the resulting logical ID;
 - the next index resolves the selected layer to its base deterministic analysis parent, reads path-to-logical-ID and exact content-digest state only from that immutable parent, and obtains its Git baseline only from the observation selected by authoritative `current.json`; orphan observations never participate;
-- Phase 1 forms current added/changed targets and prior deleted/changed origins from the union of Git facts and parent/current selected-manifest path deltas, which allows configured-untracked paths to participate. A changed same-path target has a continuity edge to its prior path; every eligible cross-path exact-digest match adds an edge based only on persisted parent source-record digests;
+- Phase 1 derives current added/changed targets and prior deleted/changed origins authoritatively from the parent/current selected-manifest path and content-digest deltas. Git `A`, `D`, rename, and untracked facts may confirm only paths already present in those actual manifest deltas; they never promote an unchanged continuous path into the candidate graph. This still admits genuine configured-untracked and staged dirty additions when they are absent from the selected parent. A changed same-path target has a continuity edge to its prior path; every eligible cross-path exact-digest match adds an edge based only on persisted parent source-record digests;
 - an isolated continuity edge retains the logical ID and an isolated cross-path exact edge moves it. Every target in any non-isolated competing component is ambiguous with its complete sorted set of direct origins; except for an independently authoritative explicit document ID, none of those targets inherits a parent logical ID;
 - an added target with no exact edge is unresolved only when deleted origins exist; Phase 1 has no similarity fallback because snapshots do not persist parent raw bytes. Ambiguous and unresolved cases use removal/addition semantics plus warnings, and canonical unique-pair, complete ambiguity, and unresolved maps all enter deterministic `input_digest`.
 

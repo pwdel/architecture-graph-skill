@@ -6295,6 +6295,7 @@ git commit -m "feat: ingest structured and configured text sources"
 **Files:**
 - Modify: `scripts/architecture_graph/config.py`
 - Modify: `scripts/architecture_graph/project.py`
+- Modify: `scripts/architecture_graph/jsonl_store.py`
 - Modify: `scripts/architecture_graph/snapshot.py`
 - Create: `scripts/architecture_graph/indexer.py`
 - Modify: `scripts/architecture_graph/cli.py`
@@ -6307,16 +6308,20 @@ git commit -m "feat: ingest structured and configured text sources"
 **Interfaces:**
 - Produces: `IndexResult(snapshot_id, observation_id, reused, source_count, segment_count, warning_count)`.
 - Produces: `index_repository(root: Path, memory_root: Path | None = None, config_path: Path | None = None, observed_at: str | None = None) -> IndexResult`.
+- Produces: `ProjectIdentity(repository_root, normalized_remote, project_id)` and constructs `ProjectPaths` from the identity captured in the stable repository token; it never rereads identity between capture and path selection.
+- Produces: `CurrentPointerState(value, canonical_token, selected_observation, selected_observation_token)`, with `CurrentPointerState.absent()` for genesis. Publication and reuse compare both canonical tokens and their absent/present shape under the project lock: the complete pointer fields plus the exact selected observation row.
+- Changes publication to accept the initially captured observation, a complete expected pointer state, and a zero-argument final-repository guard that returns the final observation. The initial observation is validated before staging; the guard result alone is recorded.
 - Adds CLI command: `architecture-graph index ROOT [--memory-root PATH] [--config PATH] [--json]`.
 - An absent implicit `ROOT/.architecture-graph.yaml` selects `ProjectConfig()` defaults. An explicit `--config` is resolved against `ROOT` when relative and must be a readable regular file; missing, unreadable, and directory-valued explicit paths are user-state failures. The CLI writes no stdout, writes one concise diagnostic to stderr, returns 2, and never changes `current.json` for these failures.
 - Publication and reuse accept a null commit or a lowercase 40/64-hex Git object ID only. The same shared validator runs before staging/locking and when the authoritative selected observation becomes a lineage baseline.
-- Resolves source lineage only against the deterministic analysis parent named by the observation selected in authoritative `current.json`. The selected observation is shape/content validated and must name the selected snapshot and the same base deterministic snapshot; orphan ledger rows are ignored. Its commit is the only Git baseline. Git status candidates are unioned with parent/current selected-manifest path deltas so configured-untracked renames participate. The deterministic candidate graph spans current added/changed targets and prior deleted/changed origins, with same-path continuity edges plus cross-path exact-digest edges based only on persisted parent `content_hash` values. An isolated continuity edge retains the path ID; an isolated exact edge is the only accepted rename. Every target in a competing component becomes ambiguous with its complete sorted direct-origin set. Only an added target without an exact edge may be unresolved, and only when a deleted origin exists; Phase 1 has no similarity fallback. Ambiguous current successors conservatively receive add/remove identities and warnings without degrading parse status. Canonical pairs, complete ambiguous target-origin maps, and unresolved cases enter `input_digest`.
+- Resolves source lineage only against the deterministic analysis parent named by the observation selected in authoritative `current.json`. The selected observation is shape/content validated and must name the selected snapshot and the same base deterministic snapshot; orphan ledger rows are ignored. Its commit is the only Git baseline. Parent/current selected manifests are authoritative for continuity: Git `A`, `D`, and untracked facts may confirm only paths genuinely added or deleted between those manifests and may never promote an unchanged continuous path. Genuine configured-untracked and staged dirty additions remain eligible when absent from the selected parent. The deterministic candidate graph spans current added/changed targets and prior deleted/changed origins, with same-path continuity edges plus cross-path exact-digest edges based only on persisted parent `content_hash` values. An isolated continuity edge retains the path ID; an isolated exact edge is the only accepted rename. Every target in a competing component becomes ambiguous with its complete sorted direct-origin set. Only an added target without an exact edge may be unresolved, and only when a deleted origin exists; Phase 1 has no similarity fallback. Ambiguous current successors conservatively receive add/remove identities and warnings without degrading parse status. Canonical pairs, complete ambiguous target-origin maps, and unresolved cases enter `input_digest`.
 - `dirty_fingerprint` is an observation-only digest over a versioned canonical preimage containing full file type/mode, status, path, and independent exact staged/worktree/untracked content digests. Repeated same-path staged `MM`, worktree, untracked, regular-file, and symlink states are distinguished. Snapshot identity excludes branch, commit, dirty state, and time.
-- Project identity obtains the remote through the same binary, strict UTF-8 Git boundary as other observations. Executable, command, remote-decoding, status-decoding, and path-decoding failures become `RepositoryStateError`.
-- Repository indexing uses a content-sensitive read window. Configuration bytes, fully materialized configuration, selected path/content facts, Git identity, and the versioned dirty preimage must match in two consecutive captures and again immediately before reuse/publication. A concurrent mutation raises a user-state error before pointer replacement; it never publishes inputs from one state with observation provenance from another.
+- Project identity obtains the normalized remote through the same binary, strict UTF-8 Git boundary as other observations. The normalized remote and derived project ID enter every stable repository token, `ProjectPaths` is constructed from that captured identity, and the final guard rederives both. Executable, command, remote-decoding, status-decoding, and path-decoding failures become `RepositoryStateError`.
+- Resolved project storage must remain beneath the resolved memory root and outside the resolved repository. Before any project-state read or write, existing project, staging, snapshots, reviews, and cache entries must be real directories and the lock, pointer, observation ledger, and project metadata entries must be regular files; symlinks and other path types fail closed. Task 10 uses one POSIX anchored project-directory context with `dir_fd`, `O_DIRECTORY`, and `O_NOFOLLOW` for its lock, atomic file, ledger, staging, and snapshot-install operations, so an existing redirection cannot escape the selected memory boundary. This adds no database or dependency.
+- Repository indexing uses a content-sensitive read window. Configuration bytes, fully materialized configuration, selected path/content facts, normalized remote, derived project ID, Git identity, and the versioned dirty preimage must match in two consecutive captures. Changed publication runs the final token guard after staging and collision verification; reuse runs it after immutable snapshot validation. Each guard returns the final observation immediately before any snapshot install, ledger append, or pointer write. A concurrent mutation raises a user-state error without selecting stale state.
 - `parse_status` describes adapter coverage only. Rename diagnostics remain in `source.warning_ids` but do not make a completely parsed source partial. A source-level `parse_failed` without segments is `failed`; any adapter/coverage warning with usable segments is `partial`; otherwise it is `complete`.
 - Freshness is `material_input_digest` equality with the selected snapshot. Thus an immediate index after an exact or unresolved rename reuses the selected snapshot; a byte-identical added path changes material identity but not source-revision identity; and changed-then-reverted bytes create a child of the currently selected deterministic analysis parent. A selected layered snapshot is preserved on unchanged material and its observation retains its base deterministic ID. End-to-end layered publication remains deferred only until Phase 2 installs kind-specific validators; this task tests the selection/baseline boundary with a validated layered fixture.
-- File-valued or unwritable memory roots and other storage `OSError`s produce one sanitized stderr diagnostic and exit 2 in human and JSON modes, with empty stdout and no pointer mutation. Snapshot/record `ValueError`s remain fail-fast.
+- Reuse computes every fallible result field, including source, segment, and warning counts, before final validation or publication. File-valued, in-repository, redirected, non-directory, or unwritable memory state and other storage `OSError`s produce one sanitized stderr diagnostic and exit 2 in human and JSON modes with empty stdout. Failures before the ledger replacement leave both ledger and selected pointer unchanged; a later pre-pointer failure may leave the documented orphan snapshot or observation. `os.replace(..., "current.json")` is the flat-file commit point: an error before that call preserves the old selection, while a directory-sync or lock-release error after a successful replace has an explicitly indeterminate committed/durability outcome and must never be reported as guaranteed unselected or blindly retried. Snapshot/record `ValueError`s remain fail-fast. Every `schema_version` boundary requires `type(value) is int`; JSON booleans never satisfy version 1.
 
 - [ ] **Step 1: Configure and create a complete temporary fixture repository**
 
@@ -6373,8 +6378,18 @@ from architecture_graph.indexer import (
     _selected_observation_commit,
     index_repository,
 )
-from architecture_graph.project import ProjectPaths
-from architecture_graph.snapshot import SnapshotReader, publish_snapshot
+from architecture_graph.project import (
+    ProjectPaths,
+    ProjectStorage,
+    capture_project_identity,
+)
+from architecture_graph.snapshot import (
+    CurrentPointerState,
+    SnapshotReader,
+    observe_existing_snapshot,
+    publish_snapshot,
+    read_current_pointer_state,
+)
 
 
 def test_index_publishes_every_phase1_payload(
@@ -6918,13 +6933,20 @@ version makes later changes explicit. Git failures are sanitized here rather
 than exposing a subprocess traceback or repository-local stderr:
 
 ```python
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
+import re
+import secrets
 import stat
 
 from architecture_graph.canonical import canonical_bytes
 
 
 class RepositoryStateError(RuntimeError):
+    pass
+
+
+class PublicationCommitUncertain(RepositoryStateError):
     pass
 
 
@@ -6974,19 +6996,737 @@ def _decode_git_path(raw: bytes) -> str:
         raise RepositoryStateError("Git returned a non-UTF-8 path") from error
 
 
-def project_id(root: Path) -> str:
-    resolved = root.resolve()
+@dataclass(frozen=True)
+class ProjectIdentity:
+    repository_root: Path
+    normalized_remote: str
+    project_id: str
+
+
+def capture_project_identity(root: Path) -> ProjectIdentity:
+    repository = root.resolve()
     remote = _git_optional(
-        resolved,
+        repository,
         "config",
         "--get",
         "remote.origin.url",
         absent_returncodes=(1,),
     )
-    identity = f"{normalize_remote(remote or '')}\n{resolved.as_posix()}".encode(
-        "utf-8"
+    normalized_remote = normalize_remote(remote or "")
+    identity = hashlib.sha256(
+        f"{normalized_remote}\n{repository.as_posix()}".encode("utf-8")
+    ).hexdigest()
+    return ProjectIdentity(repository, normalized_remote, identity)
+
+
+def project_id(root: Path) -> str:
+    return capture_project_identity(root).project_id
+
+
+def _projects_root(memory_root: Path | None) -> Path:
+    if memory_root is not None:
+        selected = memory_root
+    elif os.environ.get("ARCHITECTURE_GRAPH_MEMORY_ROOT"):
+        selected = Path(os.environ["ARCHITECTURE_GRAPH_MEMORY_ROOT"])
+    else:
+        codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        selected = codex_home / "memories" / "architecture-graph" / "projects"
+    return selected.resolve(strict=False)
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    return path == parent or path.is_relative_to(parent)
+
+
+def _validate_optional_component(
+    path: Path, expected: str
+) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    valid = stat.S_ISDIR(mode) if expected == "directory" else stat.S_ISREG(mode)
+    if stat.S_ISLNK(mode) or not valid:
+        raise RepositoryStateError(
+            f"project storage component must be a {expected}: {path.name}"
+        )
+
+
+@dataclass(frozen=True)
+class ProjectPaths:
+    root: Path
+    project_id: str
+    projects_root: Path
+    project_dir: Path
+    snapshots_dir: Path
+    reviews_dir: Path
+    cache_dir: Path
+    current_path: Path
+    observations_path: Path
+    project_file: Path
+    lock_path: Path
+
+    @classmethod
+    def resolve(
+        cls,
+        root: Path,
+        memory_root: Path | None = None,
+        *,
+        identity: ProjectIdentity | None = None,
+    ) -> "ProjectPaths":
+        repository = root.resolve()
+        selected_identity = identity or capture_project_identity(repository)
+        if selected_identity.repository_root != repository:
+            raise RepositoryStateError("captured project identity has a different root")
+        projects_root = _projects_root(memory_root)
+        project_dir = projects_root / selected_identity.project_id
+        resolved_project = project_dir.resolve(strict=False)
+        if not _is_within(resolved_project, projects_root):
+            raise RepositoryStateError("project storage escapes the memory root")
+        if _is_within(resolved_project, repository):
+            raise RepositoryStateError("project storage is inside the repository")
+        _validate_optional_component(project_dir, "directory")
+        project = cls(
+            root=repository,
+            project_id=selected_identity.project_id,
+            projects_root=projects_root,
+            project_dir=project_dir,
+            snapshots_dir=project_dir / "snapshots",
+            reviews_dir=project_dir / "reviews",
+            cache_dir=project_dir / "cache",
+            current_path=project_dir / "current.json",
+            observations_path=project_dir / "observations.jsonl",
+            project_file=project_dir / "PROJECT.json",
+            lock_path=project_dir / ".publish.lock",
+        )
+        for path in (
+            project.project_dir / ".staging",
+            project.snapshots_dir,
+            project.reviews_dir,
+            project.cache_dir,
+        ):
+            _validate_optional_component(path, "directory")
+        for path in (
+            project.lock_path,
+            project.current_path,
+            project.observations_path,
+            project.project_file,
+        ):
+            _validate_optional_component(path, "regular file")
+        return project
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _component(name: str) -> str:
+    if name in {"", ".", ".."} or "/" in name or "\\" in name:
+        raise RepositoryStateError("invalid project storage component")
+    return name
+
+
+def _walk_directory(
+    parent_fd: int, components: Sequence[str], *, create: bool
+) -> int:
+    descriptor = os.dup(parent_fd)
+    try:
+        for raw_name in components:
+            name = _component(raw_name)
+            if create:
+                try:
+                    os.mkdir(name, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            child = os.open(name, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            previous = descriptor
+            descriptor = child
+            os.close(previous)
+        return descriptor
+    except BaseException as error:
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup_error:
+            error.add_note(f"directory-walk close failed: {cleanup_error}")
+        raise
+
+
+def _open_resolved_directory(path: Path, *, create: bool) -> int:
+    if not path.is_absolute():
+        raise RepositoryStateError("project storage root must be absolute")
+    root_fd = os.open(path.anchor, _DIRECTORY_FLAGS)
+    try:
+        result_fd = _walk_directory(root_fd, path.parts[1:], create=create)
+    except BaseException as error:
+        try:
+            os.close(root_fd)
+        except BaseException as cleanup_error:
+            error.add_note(f"filesystem-root close failed: {cleanup_error}")
+        raise
+    try:
+        os.close(root_fd)
+    except BaseException as error:
+        try:
+            os.close(result_fd)
+        except BaseException as cleanup_error:
+            error.add_note(f"resolved-directory close failed: {cleanup_error}")
+        raise
+    return result_fd
+
+
+class ProjectStorage(AbstractContextManager["ProjectStorage"]):
+    """Anchors Task 10 durable operations beneath one verified project dir."""
+
+    DIRECTORY_COMPONENTS = frozenset({".staging", "snapshots", "reviews", "cache"})
+    REGULAR_COMPONENTS = frozenset(
+        {".publish.lock", "current.json", "observations.jsonl", "PROJECT.json"}
     )
-    return hashlib.sha256(identity).hexdigest()
+
+    def __init__(self, project: ProjectPaths, *, create: bool) -> None:
+        self.project = project
+        self.create = create
+        self._projects_fd: int | None = None
+        self._project_fd: int | None = None
+
+    def __enter__(self) -> "ProjectStorage":
+        projects_fd = _open_resolved_directory(
+            self.project.projects_root, create=self.create
+        )
+        try:
+            project_fd = _walk_directory(
+                projects_fd,
+                (self.project.project_id,),
+                create=self.create,
+            )
+        except BaseException as error:
+            try:
+                os.close(projects_fd)
+            except BaseException as cleanup_error:
+                error.add_note(f"projects-root close failed: {cleanup_error}")
+            raise
+        self._projects_fd = projects_fd
+        self._project_fd = project_fd
+        try:
+            self.validate_reserved_components()
+            return self
+        except BaseException as error:
+            self.__exit__(type(error), error, error.__traceback__)
+            raise
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        project_fd = self._project_fd
+        projects_fd = self._projects_fd
+        self._project_fd = self._projects_fd = None
+        cleanup_errors: list[BaseException] = []
+        for descriptor in (project_fd, projects_fd):
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            if exc_value is not None:
+                for error in cleanup_errors:
+                    exc_value.add_note(f"storage close failed: {error}")
+            else:
+                primary = cleanup_errors[0]
+                for error in cleanup_errors[1:]:
+                    primary.add_note(f"additional close failure: {error}")
+                raise primary
+
+    @property
+    def project_fd(self) -> int:
+        if self._project_fd is None:
+            raise RepositoryStateError("project storage context is closed")
+        return self._project_fd
+
+    def _optional_mode(self, name: str) -> int | None:
+        try:
+            return os.stat(
+                name,
+                dir_fd=self.project_fd,
+                follow_symlinks=False,
+            ).st_mode
+        except FileNotFoundError:
+            return None
+
+    def validate_reserved_components(self) -> None:
+        for name in sorted(self.DIRECTORY_COMPONENTS):
+            mode = self._optional_mode(name)
+            if mode is not None and not stat.S_ISDIR(mode):
+                raise RepositoryStateError(
+                    f"project storage component must be a directory: {name}"
+                )
+        for name in sorted(self.REGULAR_COMPONENTS):
+            mode = self._optional_mode(name)
+            if mode is not None and not stat.S_ISREG(mode):
+                raise RepositoryStateError(
+                    f"project storage component must be a regular file: {name}"
+                )
+
+    def directory_fd(
+        self, components: Sequence[str], *, create: bool = False
+    ) -> int:
+        return _walk_directory(self.project_fd, components, create=create)
+
+    def open_regular(
+        self,
+        components: Sequence[str],
+        flags: int,
+        mode: int = 0o600,
+    ) -> int:
+        if not components:
+            raise RepositoryStateError("regular-file path is empty")
+        parent_fd = self.directory_fd(components[:-1])
+        descriptor: int | None = None
+        primary_error: BaseException | None = None
+        try:
+            try:
+                descriptor = os.open(
+                    _component(components[-1]),
+                    flags | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    mode,
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError as error:
+                primary_error = error
+                raise
+            except OSError as error:
+                wrapped = RepositoryStateError(
+                    "cannot open project storage regular file"
+                )
+                primary_error = wrapped
+                raise wrapped from error
+        finally:
+            try:
+                os.close(parent_fd)
+            except BaseException as close_error:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except BaseException as descriptor_error:
+                        close_error.add_note(
+                            f"opened-file close also failed: {descriptor_error}"
+                        )
+                    descriptor = None
+                if primary_error is not None:
+                    primary_error.add_note(
+                        f"parent-directory close failed: {close_error}"
+                    )
+                else:
+                    raise
+        if descriptor is None:
+            raise AssertionError("regular file opened without a descriptor")
+        try:
+            opened_mode = os.fstat(descriptor).st_mode
+        except BaseException as error:
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup_error:
+                error.add_note(f"opened-file close failed: {cleanup_error}")
+            raise
+        if not stat.S_ISREG(opened_mode):
+            error = RepositoryStateError("project storage file is not regular")
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup_error:
+                error.add_note(f"opened-file close failed: {cleanup_error}")
+            raise error
+        return descriptor
+
+    def read_regular_bytes(
+        self, components: Sequence[str], *, missing_ok: bool = False
+    ) -> bytes | None:
+        try:
+            descriptor = self.open_regular(components, os.O_RDONLY)
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise
+        try:
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                return handle.read()
+        finally:
+            os.close(descriptor)
+
+    def atomic_replace_bytes(
+        self, components: Sequence[str], payload: bytes
+    ) -> None:
+        if not components:
+            raise RepositoryStateError("regular-file path is empty")
+        name = _component(components[-1])
+        parent_fd = self.directory_fd(components[:-1], create=True)
+        temporary: str | None = None
+        primary_error: BaseException | None = None
+        replacement_completed = False
+        try:
+            existing = self._mode_at(parent_fd, name)
+            if existing is not None and not stat.S_ISREG(existing):
+                raise RepositoryStateError(
+                    f"project storage component must be a regular file: {name}"
+                )
+            temporary = f".{name}.{secrets.token_hex(12)}"
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            try:
+                with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                    handle.write(payload)
+                    handle.flush()
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(
+                temporary,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            replacement_completed = True
+            try:
+                os.fsync(parent_fd)
+            except OSError as error:
+                if name == "current.json":
+                    raise PublicationCommitUncertain(
+                        "current pointer replace succeeded; durability is indeterminate"
+                    ) from error
+                raise
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            cleanup_errors: list[BaseException] = []
+            try:
+                if temporary is not None:
+                    try:
+                        os.unlink(temporary, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        pass
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+            finally:
+                try:
+                    os.close(parent_fd)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            if cleanup_errors:
+                if primary_error is not None:
+                    for error in cleanup_errors:
+                        primary_error.add_note(
+                            f"atomic-replace cleanup failed: {error}"
+                        )
+                else:
+                    primary = cleanup_errors[0]
+                    for error in cleanup_errors[1:]:
+                        primary.add_note(f"additional cleanup failure: {error}")
+                    if name == "current.json" and replacement_completed:
+                        raise PublicationCommitUncertain(
+                            "current pointer replace succeeded; durability is indeterminate"
+                        ) from primary
+                    raise primary
+
+    def prepare_atomic_replace_bytes(
+        self, components: Sequence[str], prefix: bytes
+    ) -> "PreparedAtomicReplace":
+        if not components:
+            raise RepositoryStateError("regular-file path is empty")
+        name = _component(components[-1])
+        parent_fd = self.directory_fd(components[:-1], create=True)
+        temporary: str | None = None
+        descriptor: int | None = None
+        try:
+            existing = self._mode_at(parent_fd, name)
+            if existing is not None and not stat.S_ISREG(existing):
+                raise RepositoryStateError(
+                    f"project storage component must be a regular file: {name}"
+                )
+            temporary = f".{name}.{secrets.token_hex(12)}"
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(prefix)
+                handle.flush()
+            os.fsync(descriptor)
+            return PreparedAtomicReplace(
+                parent_fd, descriptor, temporary, name
+            )
+        except BaseException as error:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException as cleanup_error:
+                    error.add_note(f"prepared-file close failed: {cleanup_error}")
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                except BaseException as cleanup_error:
+                    error.add_note(f"prepared-file unlink failed: {cleanup_error}")
+            try:
+                os.close(parent_fd)
+            except BaseException as cleanup_error:
+                error.add_note(f"prepared parent close failed: {cleanup_error}")
+            raise
+
+    def create_stage(self) -> tuple[str, str]:
+        parent_fd = self.directory_fd((".staging",), create=True)
+        try:
+            while True:
+                name = f"snapshot-{secrets.token_hex(12)}"
+                try:
+                    os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    continue
+                try:
+                    os.fsync(parent_fd)
+                except BaseException as error:
+                    try:
+                        os.rmdir(name, dir_fd=parent_fd)
+                    except BaseException as cleanup_error:
+                        error.add_note(
+                            f"orphan staging directory {name}: {cleanup_error}"
+                        )
+                    raise
+                return ".staging", name
+        finally:
+            os.close(parent_fd)
+
+    def write_stage_file(
+        self, stage: tuple[str, str], name: str, payload: bytes
+    ) -> None:
+        parent_fd = self.directory_fd(stage)
+        try:
+            descriptor = os.open(
+                _component(name),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            try:
+                with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                    handle.write(payload)
+                    handle.flush()
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+
+    def install_stage(self, stage: tuple[str, str], digest_hex: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", digest_hex):
+            raise ValueError("invalid snapshot directory digest")
+        staging_fd = self.directory_fd((stage[0],))
+        snapshots_fd: int | None = None
+        try:
+            snapshots_fd = self.directory_fd(("snapshots",), create=True)
+            source_mode = self._mode_at(staging_fd, stage[1])
+            if source_mode is None or not stat.S_ISDIR(source_mode):
+                raise RepositoryStateError("staging snapshot is not a directory")
+            if self._mode_at(snapshots_fd, digest_hex) is not None:
+                raise FileExistsError(digest_hex)
+            os.replace(
+                stage[1],
+                digest_hex,
+                src_dir_fd=staging_fd,
+                dst_dir_fd=snapshots_fd,
+            )
+            os.fsync(staging_fd)
+            os.fsync(snapshots_fd)
+        finally:
+            try:
+                os.close(staging_fd)
+            finally:
+                if snapshots_fd is not None:
+                    os.close(snapshots_fd)
+
+    def remove_stage(self, stage: tuple[str, str]) -> None:
+        staging_fd = self.directory_fd((stage[0],))
+        try:
+            stage_fd = self.directory_fd(stage)
+            try:
+                for name in os.listdir(stage_fd):
+                    mode = self._mode_at(stage_fd, name)
+                    if mode is None:
+                        continue
+                    if not stat.S_ISREG(mode):
+                        raise RepositoryStateError(
+                            "staging snapshot contains a non-regular file"
+                        )
+                    os.unlink(name, dir_fd=stage_fd)
+                os.fsync(stage_fd)
+            finally:
+                os.close(stage_fd)
+            os.rmdir(stage[1], dir_fd=staging_fd)
+            os.fsync(staging_fd)
+        finally:
+            os.close(staging_fd)
+
+    def lock_descriptor(self) -> int:
+        return self.open_regular(
+            (".publish.lock",), os.O_RDWR | os.O_CREAT
+        )
+
+    @staticmethod
+    def _mode_at(parent_fd: int, name: str) -> int | None:
+        try:
+            return os.stat(
+                name, dir_fd=parent_fd, follow_symlinks=False
+            ).st_mode
+        except FileNotFoundError:
+            return None
+
+
+class PreparedAtomicReplace(AbstractContextManager["PreparedAtomicReplace"]):
+    """Owns one anchored temporary regular file until commit or cleanup."""
+
+    def __init__(
+        self,
+        parent_fd: int,
+        descriptor: int,
+        temporary: str,
+        target: str,
+    ) -> None:
+        self._parent_fd: int | None = parent_fd
+        self._descriptor: int | None = descriptor
+        self._temporary = temporary
+        self._target = target
+        self._renamed = False
+
+    def __enter__(self) -> "PreparedAtomicReplace":
+        return self
+
+    def commit_suffix(self, suffix: bytes) -> None:
+        if self._descriptor is None or self._parent_fd is None:
+            raise RuntimeError("prepared replacement is no longer open")
+        descriptor = self._descriptor
+        with os.fdopen(descriptor, "ab", closefd=False) as handle:
+            handle.write(suffix)
+            handle.flush()
+        os.fsync(descriptor)
+        self._descriptor = None
+        os.close(descriptor)
+        os.replace(
+            self._temporary,
+            self._target,
+            src_dir_fd=self._parent_fd,
+            dst_dir_fd=self._parent_fd,
+        )
+        self._renamed = True
+        parent_fd = self._parent_fd
+        sync_error: BaseException | None = None
+        try:
+            os.fsync(parent_fd)
+        except BaseException as error:
+            sync_error = error
+        finally:
+            self._parent_fd = None
+            try:
+                os.close(parent_fd)
+            except BaseException as close_error:
+                if sync_error is not None:
+                    sync_error.add_note(
+                        f"prepared parent close failed: {close_error}"
+                    )
+                else:
+                    raise
+        if sync_error is not None:
+            raise sync_error
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        descriptor = self._descriptor
+        parent_fd = self._parent_fd
+        self._descriptor = self._parent_fd = None
+        cleanup_errors: list[BaseException] = []
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if parent_fd is not None:
+            if not self._renamed:
+                try:
+                    os.unlink(self._temporary, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            try:
+                os.close(parent_fd)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            if exc_value is not None:
+                for error in cleanup_errors:
+                    exc_value.add_note(f"prepared-file cleanup failed: {error}")
+            else:
+                primary = cleanup_errors[0]
+                for error in cleanup_errors[1:]:
+                    primary.add_note(f"additional cleanup failure: {error}")
+                raise primary
+
+
+class ProjectLock(AbstractContextManager["ProjectLock"]):
+    def __init__(self, storage: ProjectStorage) -> None:
+        self.storage = storage
+        self._descriptor: int | None = None
+
+    def __enter__(self) -> "ProjectLock":
+        descriptor = self.storage.lock_descriptor()
+        locked = False
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            locked = True
+            self.storage.validate_reserved_components()
+            self._descriptor = descriptor
+            return self
+        except BaseException as error:
+            try:
+                if locked:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    except BaseException as cleanup_error:
+                        error.add_note(
+                            f"lock release also failed: {cleanup_error}"
+                        )
+            finally:
+                try:
+                    os.close(descriptor)
+                except BaseException as cleanup_error:
+                    error.add_note(
+                        f"lock descriptor close also failed: {cleanup_error}"
+                    )
+            raise
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if self._descriptor is not None:
+            descriptor = self._descriptor
+            self._descriptor = None
+            unlock_error: BaseException | None = None
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except BaseException as error:
+                unlock_error = error
+            finally:
+                try:
+                    os.close(descriptor)
+                except BaseException as close_error:
+                    if unlock_error is not None:
+                        unlock_error.add_note(
+                            f"lock descriptor close failed: {close_error}"
+                        )
+                    else:
+                        raise
+            if unlock_error is not None:
+                raise unlock_error
 
 
 def _path_digest(path: Path) -> str | None:
@@ -7104,20 +7844,124 @@ def _stable_dirty_preimage(root: Path) -> Mapping[str, JSONValue]:
 def capture_git_observation(
     root: Path, observed_at: str | None = None
 ) -> dict[str, JSONValue]:
-    branch = _git_optional(root, "symbolic-ref", "--short", "-q", "HEAD")
-    commit = _git_optional(
+    branch_before = _git_optional(
+        root, "symbolic-ref", "--short", "-q", "HEAD"
+    )
+    commit_before = _git_optional(
         root, "rev-parse", "HEAD", absent_returncodes=(128,)
     )
     dirty_preimage = _stable_dirty_preimage(root)
+    branch_after = _git_optional(
+        root, "symbolic-ref", "--short", "-q", "HEAD"
+    )
+    commit_after = _git_optional(
+        root, "rev-parse", "HEAD", absent_returncodes=(128,)
+    )
+    if (branch_before, commit_before) != (branch_after, commit_after):
+        raise RepositoryStateError(
+            "Git HEAD changed while repository state was captured"
+        )
     timestamp = observed_at or datetime.now(timezone.utc).isoformat().replace(
         "+00:00", "Z"
     )
     return {
-        "branch": branch,
-        "commit": commit,
+        "branch": branch_after,
+        "commit": commit_after,
         "dirty_fingerprint": sha256_digest(canonical_bytes(dirty_preimage)),
         "observed_at": timestamp,
     }
+```
+
+This replaces the earlier `ProjectPaths` and `ProjectLock` definitions. An
+index run passes `capture.identity` to `ProjectPaths.resolve()`; compatibility
+callers that omit it perform one strict identity capture. `ProjectStorage` is
+the only new storage surface. Its absolute-root walk resolves the configured
+memory location first, then opens every actual component with
+`O_DIRECTORY | O_NOFOLLOW`; all descendants are relative to the held project
+descriptor. The fixed reserved-component allowlist rejects a symlink, FIFO,
+device, socket, or directory/file type mismatch before any project-state read
+or write and again after the lock is acquired. Regular-file opens add
+`O_NONBLOCK` before the post-open `fstat`, so a FIFO substituted after entry
+validation cannot hang the process.
+
+`_write_stage()`, `_verify_collision()`, `_validate_snapshot_contents()`,
+`_current()`, `SnapshotReader.open()`, `publish_snapshot()`, and
+`observe_existing_snapshot()` must use the anchored context for Task 10 state.
+Stage payloads use `write_stage_file()`, complete snapshots move only through
+`install_stage()`, and cleanup uses `remove_stage()`; no `Path.open`,
+`mkdir(parents=True)`, `tempfile`, `shutil.rmtree`, or unanchored `os.replace`
+remains on a project-owned path. Snapshot payload readers open the digest
+directory with `directory_fd(("snapshots", digest))` and each fixed payload
+name with `open_regular()`. This boundary is intentionally project-scoped;
+ordinary repository-source and non-project temporary-file APIs do not change.
+
+In `scripts/architecture_graph/jsonl_store.py`, factor ledger validation and
+framing into this pure byte builder. The existing path-based ledger delegates
+to it. Task 10 validates and indexes the existing byte image before the final
+guard, copies that prefix with `ProjectStorage.prepare_atomic_replace_bytes()`,
+then appends only the canonical new-row suffix before the anchored replacement:
+
+```python
+import json
+
+from architecture_graph.canonical import canonical_bytes, canonical_dumps
+
+
+def records_from_jsonl_bytes(existing: bytes | None) -> list[Record]:
+    raw_lines = [] if existing is None else existing.splitlines(keepends=True)
+    if existing is not None and existing and not existing.endswith(b"\n"):
+        raise ValueError("ledger has non-LF framing")
+    records: list[Record] = []
+    for line in raw_lines:
+        if not line.endswith(b"\n"):
+            raise ValueError("ledger has non-LF framing")
+        raw = json.loads(line.decode("utf-8"))
+        if not isinstance(raw, dict) or line != canonical_bytes(raw):
+            raise ValueError("ledger contains noncanonical JSON")
+        validate_record(raw)
+        validate_record_shape(raw)
+        records.append(raw)
+    return records
+
+
+def validate_ledger_prefix(
+    existing: bytes | None, expected_kind: str
+) -> tuple[bytes, frozenset[str]]:
+    records = records_from_jsonl_bytes(existing)
+    ids: set[str] = set()
+    for item in records:
+        if item["kind"] != expected_kind:
+            raise ValueError(
+                f"ledger record kind mismatch: {item['kind']} != {expected_kind}"
+            )
+        record_id = str(item["id"])
+        if record_id in ids:
+            raise ValueError(f"duplicate ledger record id: {record_id}")
+        ids.add(record_id)
+    return existing or b"", frozenset(ids)
+
+
+def canonical_ledger_suffix(
+    record: Record,
+    expected_kind: str,
+    existing_ids: frozenset[str],
+) -> bytes:
+    validate_record(record)
+    validate_record_shape(record)
+    if record["kind"] != expected_kind:
+        raise ValueError(
+            f"ledger record kind mismatch: {record['kind']} != {expected_kind}"
+        )
+    if record["id"] in existing_ids:
+        raise ValueError(f"duplicate ledger record id: {record['id']}")
+    return canonical_bytes(record)
+
+
+def append_ledger_bytes(existing: bytes | None, record: Record) -> bytes:
+    prefix, existing_ids = validate_ledger_prefix(existing, str(record["kind"]))
+    return prefix + canonical_ledger_suffix(
+        record, str(record["kind"]), existing_ids
+    )
 ```
 
 Remove the old `text=True` `_git()` helper after migrating `project_id()` and
@@ -7132,7 +7976,16 @@ observation before `_write_stage()` or lock acquisition. Use the same helper in
 `observe_existing_snapshot()`:
 
 ```python
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
+
+from architecture_graph.canonical import canonical_bytes
+from architecture_graph.project import (
+    ProjectStorage,
+    PublicationCommitUncertain,
+)
 
 
 def _validated_observation(
@@ -7168,13 +8021,509 @@ def _validated_observation(
     if canonical != observed_at:
         raise ValueError("observation observed_at must be canonical UTC")
     return dict(observation)
+
+
+@dataclass(frozen=True)
+class CurrentPointerState:
+    value: dict[str, JSONValue] | None
+    canonical_token: bytes | None
+    selected_observation: Record | None
+    selected_observation_token: bytes | None
+
+    @classmethod
+    def absent(cls) -> "CurrentPointerState":
+        return cls(None, None, None, None)
+
+    @property
+    def snapshot_id(self) -> str | None:
+        if self.value is None:
+            return None
+        return str(self.value["snapshot_id"])
+
+
+def read_current_pointer_state(storage: ProjectStorage) -> CurrentPointerState:
+    raw = storage.read_regular_bytes(("current.json",), missing_ok=True)
+    if raw is None:
+        return CurrentPointerState.absent()
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("current pointer is unreadable") from error
+    expected_fields = {
+        "schema_version",
+        "snapshot_id",
+        "observation_id",
+        "published_at",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise ValueError("current pointer has invalid shape")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise ValueError("current pointer has invalid schema version")
+    if (
+        not isinstance(value["snapshot_id"], str)
+        or SNAPSHOT_ID.fullmatch(value["snapshot_id"]) is None
+        or not isinstance(value["observation_id"], str)
+        or not value["observation_id"].startswith("observation:")
+        or not isinstance(value["published_at"], str)
+    ):
+        raise ValueError("current pointer has invalid fields")
+    token = canonical_bytes(value)
+    if raw != token:
+        raise ValueError("current pointer is not canonical JSON")
+    ledger = storage.read_regular_bytes(
+        ("observations.jsonl",), missing_ok=True
+    )
+    selected_rows = [
+        item
+        for item in records_from_jsonl_bytes(ledger)
+        if item["id"] == value["observation_id"]
+    ]
+    if not selected_rows:
+        raise ValueError("selected observation is missing")
+    if len(selected_rows) != 1:
+        raise ValueError("selected observation is duplicated")
+    selected_observation = selected_rows[0]
+    validate_record(selected_observation, "observation")
+    validate_record_shape(selected_observation)
+    if (
+        selected_observation["snapshot_id"] != value["snapshot_id"]
+        or selected_observation["observed_at"] != value["published_at"]
+    ):
+        raise ValueError("selected observation does not match current pointer")
+    return CurrentPointerState(
+        value,
+        token,
+        selected_observation,
+        canonical_bytes(selected_observation),
+    )
+```
+
+Replace the reader's path-owned implementation with an explicitly borrowed or
+one-shot anchored lifecycle. A reader never silently owns a descriptor. Indexing
+passes its live `ProjectStorage`, which the reader borrows and never closes.
+Compatibility calls that omit `storage` open a fresh `ProjectStorage(create=False)`
+for the complete `open()` operation and for the complete lifetime of each
+`iter()` generator. `get()` and `select()` retain their existing validation,
+filtering, projection, and limit semantics but consume `iter()` rather than a
+path. Calling a borrowed reader after its storage context closes fails with
+`RepositoryStateError("project storage context is closed")`:
+
+```python
+def _iter_snapshot_records(
+    storage: ProjectStorage,
+    snapshot_id: str,
+    record_type: str,
+) -> Iterator[Record]:
+    match = SNAPSHOT_ID.fullmatch(snapshot_id)
+    if match is None:
+        raise ValueError(f"invalid snapshot ID: {snapshot_id}")
+    descriptor = storage.open_regular(
+        ("snapshots", match.group(2), f"{record_type}.jsonl"),
+        os.O_RDONLY,
+    )
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValueError("snapshot JSONL is unreadable") from error
+                if not isinstance(record, dict) or canonical_bytes(record) != line:
+                    raise ValueError("snapshot JSONL is not canonical")
+                validate_record(record, RECORD_KIND_BY_TYPE[record_type])
+                validate_record_shape(record)
+                yield record
+    finally:
+        os.close(descriptor)
+
+
+@dataclass(frozen=True)
+class SnapshotReader:
+    project: ProjectPaths
+    snapshot_id: str
+    snapshot_dir: Path
+    manifest: Mapping[str, JSONValue]
+    _storage: ProjectStorage | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    @classmethod
+    def open(
+        cls,
+        project: ProjectPaths,
+        snapshot_id: str | None = None,
+        *,
+        storage: ProjectStorage | None = None,
+    ) -> "SnapshotReader":
+        if storage is None:
+            with ProjectStorage(project, create=False) as transient:
+                return cls._open_with_storage(
+                    project, snapshot_id, transient, borrowed=None
+                )
+        if storage.project != project:
+            raise RepositoryStateError("reader storage belongs to another project")
+        storage.project_fd
+        return cls._open_with_storage(
+            project, snapshot_id, storage, borrowed=storage
+        )
+
+    @classmethod
+    def _open_with_storage(
+        cls,
+        project: ProjectPaths,
+        snapshot_id: str | None,
+        storage: ProjectStorage,
+        *,
+        borrowed: ProjectStorage | None,
+    ) -> "SnapshotReader":
+        selected = snapshot_id
+        if selected is None:
+            selected = read_current_pointer_state(storage).snapshot_id
+        if selected is None:
+            raise FileNotFoundError("architecture graph current.json not found")
+        match = SNAPSHOT_ID.fullmatch(selected)
+        if match is None:
+            raise ValueError(f"invalid snapshot ID: {selected}")
+        manifest = _validate_snapshot_contents(storage, selected)
+        return cls(
+            project,
+            selected,
+            project.snapshots_dir / match.group(2),
+            manifest,
+            borrowed,
+        )
+
+    def iter(self, record_type: str) -> Iterator[Record]:
+        if record_type not in RECORD_KIND_BY_TYPE:
+            raise ValueError(f"unknown record type: {record_type}")
+        if self._storage is not None:
+            return _iter_snapshot_records(
+                self._storage, self.snapshot_id, record_type
+            )
+
+        def one_shot() -> Iterator[Record]:
+            with ProjectStorage(self.project, create=False) as storage:
+                yield from _iter_snapshot_records(
+                    storage, self.snapshot_id, record_type
+                )
+
+        return one_shot()
 ```
 
 The first executable line in `publish_snapshot()` is
-`observation = _validated_observation(observation)`; only then may it call
-`_write_stage()`. `observe_existing_snapshot()` applies the same assignment
-before entering `ProjectLock`. This closes the known staging leak as part of
-Task 10 rather than deferring it to Task 12.
+`_validated_observation(initial_observation)`; only then may it call
+`_write_stage()`. `observe_existing_snapshot()` performs the same preflight
+before entering `ProjectLock`. Both functions later validate and record only
+the mapping returned by their final-repository guard. Invalid caller input
+therefore still fails before staging, while repository observation is captured
+at the actual commit boundary.
+
+Replace the publication signatures and ordering with the following. Retain the
+existing bundle normalization, manifest construction, collision comparison,
+snapshot-integrity validation, and record-shape validation inside the named
+helpers, but change their storage parameters to the anchored forms shown here:
+
+```python
+from collections.abc import Callable
+
+from architecture_graph.jsonl_store import (
+    canonical_ledger_suffix,
+    records_from_jsonl_bytes,
+    validate_ledger_prefix,
+)
+
+
+FinalRepositoryGuard = Callable[[], Mapping[str, JSONValue]]
+
+
+def _snapshot_target_exists(
+    storage: ProjectStorage, digest_hex: str
+) -> bool:
+    try:
+        descriptor = storage.directory_fd(("snapshots", digest_hex))
+    except FileNotFoundError:
+        return False
+    else:
+        os.close(descriptor)
+        return True
+
+
+def _observation_record(
+    *,
+    snapshot_id: str,
+    previous_snapshot_id: str | None,
+    base_deterministic_snapshot_id: str,
+    material_input_digest: str,
+    source_revision_digest: str,
+    observation: Mapping[str, JSONValue],
+) -> Record:
+    record = finalize_record(
+        {
+            "id": stable_id(
+                "observation",
+                snapshot_id,
+                observation["observed_at"],
+                observation["commit"],
+                observation["dirty_fingerprint"],
+            ),
+            "kind": "observation",
+            "snapshot_id": snapshot_id,
+            "previous_current_snapshot_id": previous_snapshot_id,
+            "base_deterministic_snapshot_id": base_deterministic_snapshot_id,
+            "material_input_digest": material_input_digest,
+            "source_revision_digest": source_revision_digest,
+            **dict(observation),
+        }
+    )
+    validate_record_shape(record)
+    return record
+
+
+def _require_expected_current(
+    storage: ProjectStorage,
+    expected: CurrentPointerState,
+) -> CurrentPointerState:
+    actual = read_current_pointer_state(storage)
+    actual_shape = (
+        actual.value is not None,
+        actual.selected_observation is not None,
+    )
+    expected_shape = (
+        expected.value is not None,
+        expected.selected_observation is not None,
+    )
+    if actual_shape != expected_shape or (
+        actual.canonical_token != expected.canonical_token
+        or actual.selected_observation_token
+        != expected.selected_observation_token
+    ):
+        raise RepositoryStateError(
+            "current selected state changed during indexing"
+        )
+    return actual
+
+
+def publish_snapshot(
+    project: ProjectPaths,
+    storage: ProjectStorage,
+    bundle: SnapshotBundle,
+    initial_observation: Mapping[str, JSONValue],
+    expected_current: CurrentPointerState,
+    final_repository_guard: FinalRepositoryGuard,
+) -> PublishedSnapshot:
+    _validated_observation(initial_observation)
+    stage, manifest = _write_stage(storage, bundle)
+    content_digest = str(manifest["content_digest"])
+    digest_hex = content_digest.removeprefix("sha256:")
+    snapshot_id = f"{bundle.snapshot_kind}:{digest_hex}"
+    stage_live = True
+    pointer_committed = False
+    try:
+        with ProjectLock(storage):
+            actual = _require_expected_current(storage, expected_current)
+            target_exists = _snapshot_target_exists(storage, digest_hex)
+            if target_exists:
+                _verify_collision(storage, digest_hex, manifest)
+                storage.remove_stage(stage)
+                stage_live = False
+            existing_ledger = storage.read_regular_bytes(
+                ("observations.jsonl",), missing_ok=True
+            )
+            ledger_prefix, observation_ids = validate_ledger_prefix(
+                existing_ledger, "observation"
+            )
+            project_payload = canonical_bytes(
+                {
+                    "schema_version": 1,
+                    "project_id": project.project_id,
+                    "repository_root": project.root.as_posix(),
+                }
+            )
+            prepared = storage.prepare_atomic_replace_bytes(
+                ("observations.jsonl",), ledger_prefix
+            )
+            with prepared:
+                final_observation = _validated_observation(
+                    final_repository_guard()
+                )
+                record = _observation_record(
+                    snapshot_id=snapshot_id,
+                    previous_snapshot_id=actual.snapshot_id,
+                    base_deterministic_snapshot_id=(
+                        bundle.base_deterministic_snapshot_id or snapshot_id
+                    ),
+                    material_input_digest=bundle.material_input_digest,
+                    source_revision_digest=bundle.source_revision_digest,
+                    observation=final_observation,
+                )
+                ledger_suffix = canonical_ledger_suffix(
+                    record, "observation", observation_ids
+                )
+                pointer_payload = canonical_bytes(
+                    {
+                        "schema_version": 1,
+                        "snapshot_id": snapshot_id,
+                        "observation_id": record["id"],
+                        "published_at": final_observation["observed_at"],
+                    }
+                )
+                if not target_exists:
+                    storage.install_stage(stage, digest_hex)
+                    stage_live = False
+                storage.atomic_replace_bytes(
+                    ("PROJECT.json",), project_payload
+                )
+                prepared.commit_suffix(ledger_suffix)
+                storage.atomic_replace_bytes(
+                    ("current.json",), pointer_payload
+                )
+                pointer_committed = True
+                return PublishedSnapshot(
+                    snapshot_id=snapshot_id,
+                    snapshot_dir=project.snapshots_dir / digest_hex,
+                    observation_id=str(record["id"]),
+                    reused=target_exists,
+                )
+    except BaseException as error:
+        if stage_live:
+            try:
+                storage.remove_stage(stage)
+            except FileNotFoundError:
+                pass
+            except BaseException as cleanup_error:
+                error.add_note(f"staging cleanup also failed: {cleanup_error}")
+        if pointer_committed and not isinstance(
+            error, PublicationCommitUncertain
+        ):
+            raise PublicationCommitUncertain(
+                "current pointer was replaced; completion is indeterminate"
+            ) from error
+        raise
+
+
+def observe_existing_snapshot(
+    project: ProjectPaths,
+    storage: ProjectStorage,
+    reader: SnapshotReader,
+    initial_observation: Mapping[str, JSONValue],
+    expected_current: CurrentPointerState,
+    final_repository_guard: FinalRepositoryGuard,
+) -> PublishedSnapshot:
+    _validated_observation(initial_observation)
+    pointer_committed = False
+    try:
+        with ProjectLock(storage):
+            actual = _require_expected_current(storage, expected_current)
+            if (
+                actual.snapshot_id != reader.snapshot_id
+                or reader.project != project
+            ):
+                raise RepositoryStateError(
+                    "selected snapshot changed during indexing"
+                )
+            fresh_manifest = _validate_snapshot_contents(
+                storage,
+                reader.snapshot_id,
+            )
+            existing_ledger = storage.read_regular_bytes(
+                ("observations.jsonl",), missing_ok=True
+            )
+            ledger_prefix, observation_ids = validate_ledger_prefix(
+                existing_ledger, "observation"
+            )
+            prepared = storage.prepare_atomic_replace_bytes(
+                ("observations.jsonl",), ledger_prefix
+            )
+            with prepared:
+                final_observation = _validated_observation(
+                    final_repository_guard()
+                )
+                record = _observation_record(
+                    snapshot_id=reader.snapshot_id,
+                    previous_snapshot_id=actual.snapshot_id,
+                    base_deterministic_snapshot_id=(
+                        str(fresh_manifest.get("base_deterministic_snapshot_id"))
+                        if fresh_manifest.get("base_deterministic_snapshot_id")
+                        else reader.snapshot_id
+                    ),
+                    material_input_digest=str(
+                        fresh_manifest["material_input_digest"]
+                    ),
+                    source_revision_digest=str(
+                        fresh_manifest["source_revision_digest"]
+                    ),
+                    observation=final_observation,
+                )
+                ledger_suffix = canonical_ledger_suffix(
+                    record, "observation", observation_ids
+                )
+                pointer_payload = canonical_bytes(
+                    {
+                        "schema_version": 1,
+                        "snapshot_id": reader.snapshot_id,
+                        "observation_id": record["id"],
+                        "published_at": final_observation["observed_at"],
+                    }
+                )
+                prepared.commit_suffix(ledger_suffix)
+                storage.atomic_replace_bytes(
+                    ("current.json",), pointer_payload
+                )
+                pointer_committed = True
+                return PublishedSnapshot(
+                    snapshot_id=reader.snapshot_id,
+                    snapshot_dir=reader.snapshot_dir,
+                    observation_id=str(record["id"]),
+                    reused=True,
+                )
+    except BaseException as error:
+        if pointer_committed and not isinstance(
+            error, PublicationCommitUncertain
+        ):
+            raise PublicationCommitUncertain(
+                "current pointer was replaced; completion is indeterminate"
+            ) from error
+        raise
+```
+
+`_write_stage(storage, bundle)` must remove its anchored stage on every
+exception before returning and must return only after every payload and the
+manifest have been synchronized. `_verify_collision(storage, digest, manifest)`
+and `_validate_snapshot_contents(storage, snapshot_id)` open the snapshot
+directory and every fixed payload through the same storage descriptor. The
+collision-reuse branch removes and synchronizes its redundant stage before the
+final guard. The exception handler removes any other unconsumed stage and
+preserves the primary exception if cleanup also fails. Collision removal and a
+new install both mark the stage consumed before durable project-file, ledger,
+or pointer writes. The complete existing observation ledger is parsed,
+validated, ID-indexed, copied to an anchored temporary file, and synchronized
+before the final guard. After the guard, publication validates and serializes
+only the new bounded observation and appends those bytes to the prepared file;
+it does not reparse or recopy the ledger. The prepared file is renamed and all
+of its descriptors are closed before pointer replacement. An installed stage
+may remain as an orphan immutable snapshot, and a renamed ledger may contain an
+orphan observation, if a later write fails. `ProjectStorage.atomic_replace_bytes()`
+always attempts to unlink its anchored temporary name and close its parent
+descriptor whether write, sync, or replacement fails, without replacing a
+primary error with a cleanup error.
+
+The `os.replace()` of `current.json` is the publication commit point. No
+application validation, result counting, stage cleanup, or ledger cleanup
+follows it; releasing the held publication lock is unavoidable. A failure before
+the replace leaves the old selection. A directory-sync or lock-release failure
+after a successful replace reports an indeterminate committed/durability
+outcome because flat files cannot roll the visible pointer back safely.
+
+Change `SnapshotFinalizer.publish()` to accept `storage`,
+`initial_observation`, `expected_current`, and `final_repository_guard` in that
+order and delegate to this signature. `SnapshotReader.open()` accepts an
+optional borrowed `storage: ProjectStorage`; all Task 10 indexing paths pass
+the already-open context, while compatibility callers use the documented
+one-shot reopen behavior. Migrate every existing `tests/test_snapshot.py` publication call to
+open one `ProjectStorage(project, create=True)` context, pass
+`CurrentPointerState.absent()` at genesis or the state returned by
+`read_current_pointer_state(storage)`, and pass a zero-argument observation
+lambda. No old snapshot-ID-only overload remains.
 
 In the existing `tests/test_snapshot.py`, replace its shared helper before
 adding the new regressions:
@@ -7332,16 +8681,50 @@ def test_project_id_maps_git_failures_to_repository_state(
         project_id(architecture_repo)
 
 
+def publish_for_test(
+    project: ProjectPaths,
+    snapshot_bundle: SnapshotBundle,
+    git_observation: dict[str, object],
+) -> PublishedSnapshot:
+    with ProjectStorage(project, create=True) as storage:
+        expected = read_current_pointer_state(storage)
+        return publish_snapshot(
+            project,
+            storage,
+            snapshot_bundle,
+            git_observation,
+            expected,
+            lambda: git_observation,
+        )
+
+
+def observe_for_test(
+    project: ProjectPaths,
+    snapshot_id: str,
+    git_observation: dict[str, object],
+) -> PublishedSnapshot:
+    with ProjectStorage(project, create=True) as storage:
+        expected = read_current_pointer_state(storage)
+        reader = SnapshotReader.open(project, snapshot_id, storage=storage)
+        return observe_existing_snapshot(
+            project,
+            storage,
+            reader,
+            git_observation,
+            expected,
+            lambda: git_observation,
+        )
+
+
 def test_invalid_observation_is_rejected_before_staging(
     tmp_path: Path,
 ) -> None:
     project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
     with pytest.raises(ValueError, match="canonical UTC"):
-        publish_snapshot(
+        publish_for_test(
             project,
             bundle(),
             observation(observed_at="2026-07-19T10:00:00+00:00"),
-            None,
         )
     staging = project.project_dir / ".staging"
     assert not staging.exists() or list(staging.iterdir()) == []
@@ -7354,7 +8737,7 @@ def test_empty_observation_branch_is_rejected_before_staging(
     project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
     invalid = {**observation(), "branch": ""}
     with pytest.raises(ValueError, match="nonempty string or null"):
-        publish_snapshot(project, bundle(), invalid, None)
+        publish_for_test(project, bundle(), invalid)
     staging = project.project_dir / ".staging"
     assert not staging.exists() or list(staging.iterdir()) == []
 
@@ -7364,21 +8747,19 @@ def test_observation_accepts_null_sha1_and_sha256_commits(
     tmp_path: Path, commit: str | None
 ) -> None:
     project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
-    published = publish_snapshot(
+    published = publish_for_test(
         project,
         bundle(),
         {**observation(), "commit": commit},
-        None,
     )
     assert SnapshotReader.open(project).snapshot_id == published.snapshot_id
-    observed = observe_existing_snapshot(
+    observed = observe_for_test(
         project,
-        SnapshotReader.open(project, published.snapshot_id),
+        published.snapshot_id,
         {
             **observation("2026-07-19T11:00:00Z"),
             "commit": commit,
         },
-        published.snapshot_id,
     )
     assert observed.snapshot_id == published.snapshot_id
 
@@ -7389,11 +8770,10 @@ def test_publish_rejects_invalid_commit_before_any_write(
 ) -> None:
     project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
     with pytest.raises(ValueError, match="lowercase SHA-1/SHA-256"):
-        publish_snapshot(
+        publish_for_test(
             project,
             bundle(),
             {**observation(), "commit": commit},
-            None,
         )
     assert not project.current_path.exists()
     assert not project.observations_path.exists()
@@ -7405,16 +8785,14 @@ def test_observe_rejects_invalid_commit_without_pointer_or_ledger_write(
     tmp_path: Path,
 ) -> None:
     project = ProjectPaths.resolve(tmp_path / "repo", tmp_path / "memory")
-    first = publish_snapshot(project, bundle(), observation(), None)
-    reader = SnapshotReader.open(project, first.snapshot_id)
+    first = publish_for_test(project, bundle(), observation())
     pointer_before = project.current_path.read_bytes()
     ledger_before = project.observations_path.read_bytes()
     with pytest.raises(ValueError, match="lowercase SHA-1/SHA-256"):
-        observe_existing_snapshot(
+        observe_for_test(
             project,
-            reader,
-            {**observation("2026-07-19T11:00:00Z"), "commit": "invalid"},
             first.snapshot_id,
+            {**observation("2026-07-19T11:00:00Z"), "commit": "invalid"},
         )
     assert project.current_path.read_bytes() == pointer_before
     assert project.observations_path.read_bytes() == ledger_before
@@ -7452,12 +8830,15 @@ from architecture_graph.config import (
 from architecture_graph.fingerprint import pipeline_fingerprint
 from architecture_graph.ingest import IngestionContext, IngestionResult, ingest_sources
 from architecture_graph.ingest.diagrams import warning_record
-from architecture_graph.jsonl_store import get_record
+from architecture_graph.jsonl_store import records_from_jsonl_bytes
 from architecture_graph.project import (
+    ProjectIdentity,
     ProjectPaths,
+    ProjectStorage,
     RepositoryStateError,
     _decode_git_path,
     capture_git_observation,
+    capture_project_identity,
 )
 from architecture_graph.records import (
     Record,
@@ -7466,11 +8847,13 @@ from architecture_graph.records import (
     validate_record_shape,
 )
 from architecture_graph.snapshot import (
+    CurrentPointerState,
     SnapshotBundle,
     SnapshotReader,
     _validated_observation,
     observe_existing_snapshot,
     publish_snapshot,
+    read_current_pointer_state,
 )
 from architecture_graph.sources import (
     SourceInput,
@@ -7569,8 +8952,10 @@ def _git_rename_resolution(
 ) -> RenameResolution:
     new_paths = set(current_content_hashes)
     prior_paths = set(prior_content_hashes)
-    deleted = prior_paths - new_paths
-    added = new_paths - prior_paths
+    manifest_deleted = prior_paths - new_paths
+    manifest_added = new_paths - prior_paths
+    deleted = set(manifest_deleted)
+    added = set(manifest_added)
 
     def git_bytes(*args: str) -> bytes:
         try:
@@ -7603,9 +8988,9 @@ def _git_rename_resolution(
             cursor += 2
             if status not in {"A", "D", "M", "T", "U", "X", "B"}:
                 raise RepositoryStateError("Git returned invalid name status")
-            if status == "D" and path in prior_paths:
+            if status == "D" and path in manifest_deleted:
                 deleted.add(path)
-            elif status == "A" and path in new_paths:
+            elif status == "A" and path in manifest_added:
                 added.add(path)
         untracked = git_bytes(
             "ls-files", "--others", "--exclude-standard", "-z"
@@ -7613,7 +8998,7 @@ def _git_rename_resolution(
         added.update(
             path
             for path in (_decode_git_path(item) for item in untracked if item)
-            if path in new_paths
+            if path in manifest_added
         )
 
     changed_same_paths = {
@@ -7667,36 +9052,20 @@ def _git_rename_resolution(
 
 
 def _selected_observation_commit(
-    project: ProjectPaths,
+    pointer_state: CurrentPointerState,
     current: SnapshotReader | None,
     analysis_parent_snapshot_id: str | None,
 ) -> str | None:
     if current is None:
+        if pointer_state.value is not None:
+            raise ValueError("current pointer names a missing snapshot")
         return None
-    try:
-        pointer = json.loads(project.current_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError("current pointer is unreadable") from error
-    if not isinstance(pointer, dict) or set(pointer) != {
-        "schema_version",
-        "snapshot_id",
-        "observation_id",
-        "published_at",
-    }:
-        raise ValueError("current pointer has invalid shape")
-    if (
-        pointer["schema_version"] != 1
-        or pointer["snapshot_id"] != current.snapshot_id
-    ):
+    pointer = pointer_state.value
+    if pointer is None or pointer["snapshot_id"] != current.snapshot_id:
         raise ValueError("current pointer does not match selected snapshot")
-    observation_id = pointer["observation_id"]
-    if not isinstance(observation_id, str):
-        raise ValueError("current pointer has invalid observation ID")
-    observation = get_record(project.observations_path, observation_id)
+    observation = pointer_state.selected_observation
     if observation is None:
         raise ValueError("selected observation is missing")
-    validate_record(observation, "observation")
-    validate_record_shape(observation)
     validated_observation = _validated_observation(
         {
             "branch": observation["branch"],
@@ -7720,8 +9089,7 @@ def _selected_observation_commit(
     ):
         raise ValueError("selected observation source revision mismatch")
     if (
-        not isinstance(pointer["published_at"], str)
-        or pointer["published_at"] != observation["observed_at"]
+        pointer["published_at"] != observation["observed_at"]
     ):
         raise ValueError("current pointer timestamp does not match selected observation")
     validated_commit = validated_observation["commit"]
@@ -8043,11 +9411,18 @@ def _report(
 Append to `scripts/architecture_graph/indexer.py`:
 
 ```python
-def _current_reader(project: ProjectPaths) -> SnapshotReader | None:
-    try:
-        return SnapshotReader.open(project)
-    except FileNotFoundError:
+def _current_reader(
+    project: ProjectPaths,
+    storage: ProjectStorage,
+    pointer_state: CurrentPointerState,
+) -> SnapshotReader | None:
+    if pointer_state.snapshot_id is None:
         return None
+    return SnapshotReader.open(
+        project,
+        pointer_state.snapshot_id,
+        storage=storage,
+    )
 
 
 def _analysis_parent_snapshot_id(current: SnapshotReader | None) -> str | None:
@@ -8072,6 +9447,7 @@ def _selected_material_is_fresh(
 
 @dataclass(frozen=True)
 class RepositoryCapture:
+    identity: ProjectIdentity
     config: ProjectConfig
     inputs: tuple[SourceInput, ...]
     observation: dict[str, object]
@@ -8083,6 +9459,7 @@ def _repository_capture(
     config_path: Path | None,
     observed_at: str | None,
 ) -> RepositoryCapture:
+    identity_before = capture_project_identity(repository)
     selected_config, explicit = resolve_config_path(repository, config_path)
     try:
         config = load_config(repository, config_path)
@@ -8097,6 +9474,11 @@ def _repository_capture(
     except (OSError, subprocess.CalledProcessError) as error:
         raise RepositoryStateError("cannot capture repository sources") from error
     observation = capture_git_observation(repository, observed_at)
+    identity = capture_project_identity(repository)
+    if identity != identity_before:
+        raise RepositoryStateError(
+            "project identity changed while repository state was captured"
+        )
     try:
         config_file_state: dict[str, object] = (
             {"state": "absent", "content_digest": None}
@@ -8114,6 +9496,11 @@ def _repository_capture(
         canonical_bytes(
             {
                 "schema_version": 1,
+                "project_identity": {
+                    "repository_root": identity.repository_root.as_posix(),
+                    "normalized_remote": identity.normalized_remote,
+                    "project_id": identity.project_id,
+                },
                 "config_path": selected_config.as_posix(),
                 "config_file": config_file_state,
                 "configuration_digest": configuration_digest(config),
@@ -8137,7 +9524,7 @@ def _repository_capture(
             }
         )
     )
-    return RepositoryCapture(config, inputs, observation, token)
+    return RepositoryCapture(identity, config, inputs, observation, token)
 
 
 def _stable_repository_capture(
@@ -8176,152 +9563,188 @@ def index_repository(
     config = capture.config
     inputs = capture.inputs
     config_digest = configuration_digest(config)
-    project = ProjectPaths.resolve(repository, memory_root)
-    pipeline = pipeline_fingerprint()
-    pipeline_digest = pipeline.digest
-    context = IngestionContext(
-        config_digest, pipeline_digest, __version__, config.max_segment_chars
-    )
-    material_digest = material_input_digest(inputs, config, pipeline_digest)
-    revision_digest = source_revision_digest(item.content_hash for item in inputs)
-    current = _current_reader(project)
-    expected_current = None if current is None else current.snapshot_id
-    analysis_parent_id = _analysis_parent_snapshot_id(current)
-    analysis_parent_reader = (
-        None
-        if analysis_parent_id is None
-        else current
-        if current is not None and current.snapshot_id == analysis_parent_id
-        else SnapshotReader.open(project, analysis_parent_id)
-    )
-    prior_content_hashes = (
-        {}
-        if analysis_parent_reader is None
-        else {
-            str(item["path"]): str(item["content_hash"])
-            for item in analysis_parent_reader.iter("sources")
-        }
-    )
-    previous_commit = _selected_observation_commit(
-        project, current, analysis_parent_id
-    )
-    current_content_hashes = {
-        item.relative_path: item.content_hash for item in inputs
-    }
-    rename_resolution = _git_rename_resolution(
+    project = ProjectPaths.resolve(
         repository,
-        previous_commit,
-        current_content_hashes,
-        prior_content_hashes,
-    ).relevant_to(set(current_content_hashes), set(prior_content_hashes))
-
-    if _selected_material_is_fresh(current, material_digest):
-        git_observation = _prepublication_observation(
-            repository, config_path, observed_at, capture.token
+        memory_root,
+        identity=capture.identity,
+    )
+    final_guard = lambda: _prepublication_observation(
+        repository,
+        config_path,
+        observed_at,
+        capture.token,
+    )
+    with ProjectStorage(project, create=True) as storage:
+        pipeline = pipeline_fingerprint()
+        pipeline_digest = pipeline.digest
+        context = IngestionContext(
+            config_digest,
+            pipeline_digest,
+            __version__,
+            config.max_segment_chars,
         )
-        published = observe_existing_snapshot(
-            project, current, git_observation, current.snapshot_id
+        material_digest = material_input_digest(inputs, config, pipeline_digest)
+        revision_digest = source_revision_digest(
+            item.content_hash for item in inputs
+        )
+        pointer_state = read_current_pointer_state(storage)
+        current = _current_reader(project, storage, pointer_state)
+        analysis_parent_id = _analysis_parent_snapshot_id(current)
+        analysis_parent_reader = (
+            None
+            if analysis_parent_id is None
+            else current
+            if current is not None and current.snapshot_id == analysis_parent_id
+            else SnapshotReader.open(
+                project,
+                analysis_parent_id,
+                storage=storage,
+            )
+        )
+        prior_content_hashes = (
+            {}
+            if analysis_parent_reader is None
+            else {
+                str(item["path"]): str(item["content_hash"])
+                for item in analysis_parent_reader.iter("sources")
+            }
+        )
+        previous_commit = _selected_observation_commit(
+            pointer_state,
+            current,
+            analysis_parent_id,
+        )
+        current_content_hashes = {
+            item.relative_path: item.content_hash for item in inputs
+        }
+        rename_resolution = _git_rename_resolution(
+            repository,
+            previous_commit,
+            current_content_hashes,
+            prior_content_hashes,
+        ).relevant_to(set(current_content_hashes), set(prior_content_hashes))
+
+        if _selected_material_is_fresh(current, material_digest):
+            if current is None:
+                raise AssertionError("fresh material requires a selected snapshot")
+            counts = (
+                sum(1 for _ in current.iter("sources")),
+                sum(1 for _ in current.iter("segments")),
+                sum(1 for _ in current.iter("warnings")),
+            )
+            published = observe_existing_snapshot(
+                project,
+                storage,
+                current,
+                capture.observation,
+                pointer_state,
+                final_guard,
+            )
+            return IndexResult(
+                snapshot_id=published.snapshot_id,
+                observation_id=published.observation_id,
+                reused=True,
+                source_count=counts[0],
+                segment_count=counts[1],
+                warning_count=counts[2],
+            )
+
+        input_digest = sha256_digest(
+            canonical_bytes(
+                {
+                    "material_input_digest": material_digest,
+                    "source_revision_digest": revision_digest,
+                    "analysis_parent_snapshot_id": analysis_parent_id,
+                    "rename_resolution": rename_resolution.as_digest_input(),
+                }
+            )
+        )
+        ingestion = ingest_sources(inputs, context)
+        ingestion = ingestion.merge(
+            _rename_resolution_warnings(inputs, rename_resolution, context)
+        )
+        logical_source_ids = _logical_source_ids(
+            project,
+            analysis_parent_reader,
+            inputs,
+            ingestion,
+            rename_resolution,
+        )
+        sources, source_derivations = _source_records(
+            inputs, ingestion, context, logical_source_ids
+        )
+        all_derivations = tuple(
+            sorted(
+                (*ingestion.derivations, *source_derivations),
+                key=lambda item: str(item["id"]),
+            )
+        )
+        records_by_type: dict[str, Sequence[Record]] = {
+            "sources": sources,
+            "segments": ingestion.segments,
+            "evidence": ingestion.evidence,
+            "derivations": all_derivations,
+            "warnings": ingestion.warnings,
+        }
+        bundle = SnapshotBundle(
+            snapshot_kind="deterministic",
+            configuration_digest=config_digest,
+            schema_versions={"snapshot": 1, "records": 1},
+            frozen_review_set_digest=sha256_digest(b""),
+            material_input_digest=material_digest,
+            source_revision_digest=revision_digest,
+            deterministic_pipeline_digest=pipeline_digest,
+            pipeline_fingerprint=pipeline.preimage,
+            input_digest=input_digest,
+            analysis_parent_snapshot_id=analysis_parent_id,
+            parent_snapshot_id=None,
+            base_deterministic_snapshot_id=None,
+            records_by_type=records_by_type,
+            report=_report(sources, ingestion),
+        )
+        published = publish_snapshot(
+            project,
+            storage,
+            bundle,
+            capture.observation,
+            pointer_state,
+            final_guard,
         )
         return IndexResult(
             snapshot_id=published.snapshot_id,
             observation_id=published.observation_id,
-            reused=True,
-            source_count=sum(1 for _ in current.iter("sources")),
-            segment_count=sum(1 for _ in current.iter("segments")),
-            warning_count=sum(1 for _ in current.iter("warnings")),
+            reused=published.reused,
+            source_count=len(sources),
+            segment_count=len(ingestion.segments),
+            warning_count=len(ingestion.warnings),
         )
-
-    input_digest = sha256_digest(
-        canonical_bytes(
-            {
-                "material_input_digest": material_digest,
-                "source_revision_digest": revision_digest,
-                "analysis_parent_snapshot_id": analysis_parent_id,
-                "rename_resolution": rename_resolution.as_digest_input(),
-            }
-        )
-    )
-
-    ingestion = ingest_sources(inputs, context)
-    ingestion = ingestion.merge(
-        _rename_resolution_warnings(inputs, rename_resolution, context)
-    )
-    logical_source_ids = _logical_source_ids(
-        project,
-        analysis_parent_reader,
-        inputs,
-        ingestion,
-        rename_resolution,
-    )
-    sources, source_derivations = _source_records(
-        inputs, ingestion, context, logical_source_ids
-    )
-    all_derivations = tuple(
-        sorted(
-            (*ingestion.derivations, *source_derivations),
-            key=lambda item: str(item["id"]),
-        )
-    )
-    records_by_type: dict[str, Sequence[Record]] = {
-        "sources": sources,
-        "segments": ingestion.segments,
-        "evidence": ingestion.evidence,
-        "derivations": all_derivations,
-        "warnings": ingestion.warnings,
-    }
-    bundle = SnapshotBundle(
-        snapshot_kind="deterministic",
-        configuration_digest=config_digest,
-        schema_versions={"snapshot": 1, "records": 1},
-        frozen_review_set_digest=sha256_digest(b""),
-        material_input_digest=material_digest,
-        source_revision_digest=revision_digest,
-        deterministic_pipeline_digest=pipeline_digest,
-        pipeline_fingerprint=pipeline.preimage,
-        input_digest=input_digest,
-        analysis_parent_snapshot_id=analysis_parent_id,
-        parent_snapshot_id=None,
-        base_deterministic_snapshot_id=None,
-        records_by_type=records_by_type,
-        report=_report(sources, ingestion),
-    )
-    git_observation = _prepublication_observation(
-        repository, config_path, observed_at, capture.token
-    )
-    published = publish_snapshot(
-        project,
-        bundle,
-        git_observation,
-        expected_current,
-    )
-    return IndexResult(
-        snapshot_id=published.snapshot_id,
-        observation_id=published.observation_id,
-        reused=published.reused,
-        source_count=len(sources),
-        segment_count=len(ingestion.segments),
-        warning_count=len(ingestion.warnings),
-    )
 ```
 
-The stable double capture surrounds configuration/source capture. The final
-capture is immediately before either observation reuse or changed-material
-publication. It is deliberately after adapter/report construction so a barrier
+The stable double capture surrounds initial configuration/source capture. The
+final capture is not performed in `index_repository()`; its zero-argument guard
+is invoked inside the locked publisher, after all branch-specific unbounded
+work below. This is deliberately after adapter/report construction so a barrier
 test can mutate a selected path during analysis and observe a visible failure.
 Do not catch publication/CAS/record-validation errors in this function. Only
 configuration loading, Git adapters, and source capture translate their own
-user-state failures; the last valid pointer remains untouched.
+user-state failures.
 
-Publication ordering remains exact. For changed material: validate observation
-fields, validate/write the complete staging bundle, acquire the project lock,
-compare `current.json` with `expected_current`, install or collision-verify the
-immutable snapshot, append its observation, then atomically replace
-`current.json`. For reuse: acquire the lock, compare the same CAS value,
-revalidate the selected immutable snapshot, append its observation, then
-replace `current.json` while preserving the selected snapshot ID. An installed
-snapshot or appended observation can survive a later filesystem failure, but
-without the pointer replacement it is orphan state and cannot become a lineage
-baseline.
+Publication ordering is exact. Changed material performs: initial-observation
+validation; complete synchronized staging; lock; exact pointer plus selected-row
+CAS; collision verification and redundant-stage removal; complete ledger
+validation, ID indexing, and prepared-file copy; final repository guard;
+bounded observation/pointer serialization; new-snapshot install when needed;
+`PROJECT.json` replacement; prepared-ledger suffix append and replacement; then
+`current.json` replacement. Reuse computes all result counts before entering
+publication, then performs: lock; the same full selected-state CAS; immutable
+snapshot validation; complete ledger preparation; final guard; bounded
+observation/pointer serialization; ledger replacement; and pointer replacement
+while preserving the snapshot ID. No corpus or ledger parse/copy occurs after
+the guard. An installed snapshot or appended observation can survive a later
+pre-pointer failure as orphan state and cannot become a lineage baseline.
+`os.replace(..., "current.json")` is the commit point; a later sync or lock
+release failure reports uncertain completion because the new selection may
+already be visible.
 
 The snapshot ID hashes deterministic bundle identity, including material,
 source revision, pipeline, analysis parent, and canonical rename resolution.
@@ -8343,7 +9766,10 @@ from types import SimpleNamespace
 
 from architecture_graph.canonical import atomic_write_json
 from architecture_graph.jsonl_store import AtomicJsonlLedger, write_records
-from architecture_graph.project import RepositoryStateError
+from architecture_graph.project import (
+    PublicationCommitUncertain,
+    RepositoryStateError,
+)
 from architecture_graph.records import finalize_record
 
 
@@ -8656,10 +10082,14 @@ def test_orphan_observation_is_not_a_lineage_baseline(
         }
     )
     AtomicJsonlLedger(project.observations_path).append(orphan)
-    reader = SnapshotReader.open(project, first.snapshot_id)
-    assert _selected_observation_commit(
-        project, reader, first.snapshot_id
-    ) == selected["commit"]
+    with ProjectStorage(project, create=False) as storage:
+        pointer_state = read_current_pointer_state(storage)
+        reader = SnapshotReader.open(
+            project, first.snapshot_id, storage=storage
+        )
+        assert _selected_observation_commit(
+            pointer_state, reader, first.snapshot_id
+        ) == selected["commit"]
 
 
 def test_selected_layer_observation_supplies_base_commit(tmp_path: Path) -> None:
@@ -8701,7 +10131,11 @@ def test_selected_layer_observation_supplies_base_commit(tmp_path: Path) -> None
             "source_revision_digest": digest,
         },
     )
-    assert _selected_observation_commit(project, reader, deterministic_id) == "d" * 40
+    with ProjectStorage(project, create=False) as storage:
+        pointer_state = read_current_pointer_state(storage)
+    assert _selected_observation_commit(
+        pointer_state, reader, deterministic_id
+    ) == "d" * 40
     assert _selected_material_is_fresh(reader, digest) is True
 ```
 
@@ -8946,6 +10380,833 @@ def test_changed_then_reverted_bytes_create_child_of_current_parent(
     reader = SnapshotReader.open(project, third.snapshot_id)
     assert third.snapshot_id not in {first.snapshot_id, second.snapshot_id}
     assert reader.manifest["analysis_parent_snapshot_id"] == second.snapshot_id
+```
+
+Add the post-review lineage, pointer-schema, and project-identity regressions:
+
+```python
+@pytest.mark.parametrize("dirty_kind", ["configured_untracked", "staged_add"])
+def test_parent_manifest_continuity_ignores_repeated_git_add_facts(
+    phase1_repository: Path,
+    tmp_path: Path,
+    dirty_kind: str,
+) -> None:
+    from conftest import git
+
+    unrelated_relative = "docs/architecture/unrelated.md"
+    unrelated = phase1_repository / unrelated_relative
+    unrelated.parent.mkdir(parents=True, exist_ok=True)
+    unrelated.write_text("# Unrelated\n\nDelete this source.\n")
+    git(phase1_repository, "add", unrelated_relative)
+    git(phase1_repository, "commit", "-m", "add unrelated source")
+
+    if dirty_kind == "configured_untracked":
+        relative = "architecture/local.md"
+        config = phase1_repository / ".architecture-graph.yaml"
+        config.write_text(config.read_text() + f"untracked:\n  - {relative}\n")
+    else:
+        relative = "docs/architecture/staged.md"
+    path = phase1_repository / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Continuous dirty source\n\nWorkers use the queue.\n")
+    if dirty_kind == "staged_add":
+        git(phase1_repository, "add", relative)
+
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    parent = _source_at(SnapshotReader.open(project, first.snapshot_id), relative)
+    unrelated.unlink()
+
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    current = _source_at(reader, relative)
+    assert current["logical_source_id"] == parent["logical_source_id"]
+    assert current["parse_status"] == "complete"
+    assert not any(
+        item["code"] in {"ambiguous_rename", "unresolved_rename"}
+        for item in reader.iter("warnings")
+    )
+    _assert_rename_input_digest(
+        reader,
+        first.snapshot_id,
+        RenameResolution({}, {}, {}),
+    )
+
+
+def test_only_genuinely_new_target_competes_with_deleted_exact_origin(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    from conftest import git
+
+    local_relative = "architecture/local.md"
+    old_relative = "docs/architecture/old.md"
+    new_relative = "docs/architecture/new.md"
+    body = "# Shared bytes\n\nWorkers use the queue.\n"
+    config = phase1_repository / ".architecture-graph.yaml"
+    config.write_text(config.read_text() + f"untracked:\n  - {local_relative}\n")
+    local = phase1_repository / local_relative
+    old = phase1_repository / old_relative
+    local.write_text(body)
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_text(body)
+    git(phase1_repository, "add", old_relative)
+    git(phase1_repository, "commit", "-m", "add exact tracked origin")
+
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    parent = SnapshotReader.open(project, first.snapshot_id)
+    local_parent = _source_at(parent, local_relative)
+    old_parent = _source_at(parent, old_relative)
+    git(phase1_repository, "mv", old_relative, new_relative)
+
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    local_current = _source_at(reader, local_relative)
+    new_current = _source_at(reader, new_relative)
+    assert local_current["logical_source_id"] == local_parent["logical_source_id"]
+    assert new_current["logical_source_id"] == old_parent["logical_source_id"]
+    assert not any(
+        item["code"] in {"ambiguous_rename", "unresolved_rename"}
+        for item in reader.iter("warnings")
+    )
+    _assert_rename_input_digest(
+        reader,
+        first.snapshot_id,
+        RenameResolution({new_relative: old_relative}, {}, {}),
+    )
+
+
+def test_boolean_current_schema_version_fails_closed(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    pointer = json.loads(project.current_path.read_text())
+    pointer["schema_version"] = True
+    atomic_write_json(project.current_path, pointer)
+    pointer_before = project.current_path.read_bytes()
+    ledger_before = project.observations_path.read_bytes()
+    with pytest.raises(ValueError, match="schema version"):
+        index_repository(phase1_repository, memory_root=memory)
+    assert project.current_path.read_bytes() == pointer_before
+    assert project.observations_path.read_bytes() == ledger_before
+
+
+def test_remote_change_after_project_selection_cannot_fork_history(
+    phase1_repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from conftest import git
+    import architecture_graph.indexer as indexer_module
+
+    git(
+        phase1_repository,
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/architecture-a.git",
+    )
+    memory = tmp_path / "memory"
+    old_identity = capture_project_identity(phase1_repository)
+    old_project = ProjectPaths.resolve(
+        phase1_repository,
+        memory,
+        identity=old_identity,
+    )
+    real_guard = indexer_module._prepublication_observation
+    changed = False
+
+    def change_remote_before_final_capture(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            changed = True
+            git(
+                phase1_repository,
+                "remote",
+                "set-url",
+                "origin",
+                "https://example.invalid/architecture-b.git",
+            )
+        return real_guard(*args, **kwargs)
+
+    monkeypatch.setattr(
+        indexer_module,
+        "_prepublication_observation",
+        change_remote_before_final_capture,
+    )
+    with pytest.raises(RepositoryStateError, match="changed during indexing"):
+        index_repository(phase1_repository, memory_root=memory)
+    new_identity = capture_project_identity(phase1_repository)
+    new_project = ProjectPaths.resolve(
+        phase1_repository,
+        memory,
+        identity=new_identity,
+    )
+    assert old_identity.project_id != new_identity.project_id
+    assert not old_project.current_path.exists()
+    assert not new_project.current_path.exists()
+
+    first = index_repository(phase1_repository, memory_root=memory)
+    second = index_repository(phase1_repository, memory_root=memory)
+    assert second.snapshot_id == first.snapshot_id
+    assert second.reused is True
+    assert not old_project.current_path.exists()
+    assert SnapshotReader.open(new_project).snapshot_id == first.snapshot_id
+```
+
+Add storage-containment and reserved-component regressions. They intentionally
+exercise the explicit root, a root indirection, the project entry, and every
+Task 10 durable component without introducing a general filesystem policy:
+
+```python
+import os
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+@pytest.mark.parametrize(
+    "boundary_case",
+    ["direct_in_repository", "memory_root_redirect", "project_redirect"],
+)
+def test_resolved_memory_boundary_rejects_repository_containment(
+    phase1_repository: Path,
+    tmp_path: Path,
+    capsys,
+    json_mode: bool,
+    boundary_case: str,
+) -> None:
+    identity = capture_project_identity(phase1_repository)
+    if boundary_case == "direct_in_repository":
+        memory = phase1_repository / "direct-memory"
+        effective = memory
+    elif boundary_case == "memory_root_redirect":
+        effective = phase1_repository / "redirected-memory-root"
+        effective.mkdir()
+        memory = tmp_path / "memory-root-link"
+        memory.symlink_to(effective, target_is_directory=True)
+    else:
+        memory = tmp_path / "memory"
+        memory.mkdir()
+        effective = phase1_repository / "redirected-project"
+        effective.mkdir()
+        (memory / identity.project_id).symlink_to(
+            effective,
+            target_is_directory=True,
+        )
+    before = capture_git_observation(phase1_repository)
+    argv = ["index", str(phase1_repository), "--memory-root", str(memory)]
+    if json_mode:
+        argv.append("--json")
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert "project storage" in captured.err
+    after = capture_git_observation(phase1_repository)
+    assert after["branch"] == before["branch"]
+    assert after["commit"] == before["commit"]
+    assert after["dirty_fingerprint"] == before["dirty_fingerprint"]
+    assert not (effective / "current.json").exists()
+    assert not (effective / "observations.jsonl").exists()
+
+
+@pytest.mark.parametrize("entry_kind", ["symlink", "regular_file"])
+def test_project_entry_must_be_real_directory(
+    phase1_repository: Path,
+    tmp_path: Path,
+    entry_kind: str,
+) -> None:
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    identity = capture_project_identity(phase1_repository)
+    entry = memory / identity.project_id
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if entry_kind == "symlink":
+        entry.symlink_to(outside, target_is_directory=True)
+    else:
+        entry.write_bytes(b"sentinel")
+    with pytest.raises(RepositoryStateError, match="project storage"):
+        index_repository(phase1_repository, memory_root=memory)
+    assert list(outside.iterdir()) == []
+    assert not (outside / "current.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("component", "expected_kind"),
+    [
+        (".staging", "directory"),
+        ("snapshots", "directory"),
+        ("reviews", "directory"),
+        ("cache", "directory"),
+        (".publish.lock", "regular"),
+        ("current.json", "regular"),
+        ("observations.jsonl", "regular"),
+        ("PROJECT.json", "regular"),
+    ],
+)
+@pytest.mark.parametrize("invalid_kind", ["redirect", "wrong_type"])
+def test_reserved_storage_component_rejects_redirect_and_wrong_type(
+    phase1_repository: Path,
+    tmp_path: Path,
+    component: str,
+    expected_kind: str,
+    invalid_kind: str,
+) -> None:
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    pointer_before = project.current_path.read_bytes()
+    ledger_before = project.observations_path.read_bytes()
+    selected = project.project_dir / component
+    if not selected.exists():
+        if expected_kind == "directory":
+            selected.mkdir()
+        else:
+            selected.touch()
+    backup = project.project_dir / f".{component}.original"
+    selected.rename(backup)
+    outside = tmp_path / f"outside-{component.replace('.', 'dot')}"
+    if invalid_kind == "redirect":
+        if expected_kind == "directory":
+            outside.mkdir()
+            selected.symlink_to(outside, target_is_directory=True)
+            outside_before: object = tuple(outside.iterdir())
+        else:
+            outside.write_bytes(b"outside sentinel")
+            selected.symlink_to(outside)
+            outside_before = outside.read_bytes()
+    elif expected_kind == "directory":
+        selected.write_bytes(b"wrong type")
+        outside_before = None
+    else:
+        selected.mkdir()
+        outside_before = None
+
+    with pytest.raises(RepositoryStateError, match="project storage component"):
+        index_repository(phase1_repository, memory_root=memory)
+    if invalid_kind == "redirect" and expected_kind == "directory":
+        assert tuple(outside.iterdir()) == outside_before
+    elif invalid_kind == "redirect":
+        assert outside.read_bytes() == outside_before
+    if component == "current.json":
+        assert backup.read_bytes() == pointer_before
+    else:
+        assert project.current_path.read_bytes() == pointer_before
+    if component == "observations.jsonl":
+        assert backup.read_bytes() == ledger_before
+    else:
+        assert project.observations_path.read_bytes() == ledger_before
+```
+
+Add late-guard, pre-publication-result, and full selected-state CAS regressions:
+
+```python
+def test_repository_mutation_after_stage_is_rejected_and_stage_is_cleaned(
+    phase1_repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    import architecture_graph.snapshot as snapshot_module
+
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    pointer_before = project.current_path.read_bytes()
+    ledger_before = project.observations_path.read_bytes()
+    selected = phase1_repository / "docs" / "adr" / "ADR-001-events.md"
+    selected.write_text(selected.read_text() + "\nBuild this changed snapshot.\n")
+    real_write_stage = snapshot_module._write_stage
+
+    def mutate_after_real_stage(*args, **kwargs):
+        prepared = real_write_stage(*args, **kwargs)
+        selected.write_text(selected.read_text() + "\nPost-stage mutation.\n")
+        return prepared
+
+    monkeypatch.setattr(snapshot_module, "_write_stage", mutate_after_real_stage)
+    with pytest.raises(RepositoryStateError, match="changed during indexing"):
+        index_repository(phase1_repository, memory_root=memory)
+    assert project.current_path.read_bytes() == pointer_before
+    assert project.observations_path.read_bytes() == ledger_before
+    staging = project.project_dir / ".staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
+
+
+def test_repository_mutation_after_reuse_validation_is_rejected(
+    phase1_repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    import architecture_graph.snapshot as snapshot_module
+
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    pointer_before = project.current_path.read_bytes()
+    ledger_before = project.observations_path.read_bytes()
+    selected = phase1_repository / "docs" / "adr" / "ADR-001-events.md"
+    real_validate = snapshot_module._validate_snapshot_contents
+    calls = 0
+
+    def mutate_after_locked_revalidation(*args, **kwargs):
+        nonlocal calls
+        manifest = real_validate(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            selected.write_text(
+                selected.read_text() + "\nPost-revalidation mutation.\n"
+            )
+        return manifest
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "_validate_snapshot_contents",
+        mutate_after_locked_revalidation,
+    )
+    with pytest.raises(RepositoryStateError, match="changed during indexing"):
+        index_repository(phase1_repository, memory_root=memory)
+    assert calls >= 2
+    assert project.current_path.read_bytes() == pointer_before
+    assert project.observations_path.read_bytes() == ledger_before
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_reuse_count_failure_precedes_any_publication(
+    phase1_repository: Path,
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    json_mode: bool,
+) -> None:
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    pointer_before = project.current_path.read_bytes()
+    ledger_before = project.observations_path.read_bytes()
+    real_iter = SnapshotReader.iter
+
+    def fail_segment_count(self, record_type):
+        if record_type == "segments":
+            raise OSError("simulated count failure")
+        return real_iter(self, record_type)
+
+    monkeypatch.setattr(SnapshotReader, "iter", fail_segment_count)
+    argv = ["index", str(phase1_repository), "--memory-root", str(memory)]
+    if json_mode:
+        argv.append("--json")
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.endswith("(OSError)\n")
+    assert project.current_path.read_bytes() == pointer_before
+    assert project.observations_path.read_bytes() == ledger_before
+
+
+def test_changed_publish_conflicts_with_same_snapshot_observation_update(
+    phase1_repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import architecture_graph.indexer as indexer_module
+
+    memory = tmp_path / "memory"
+    index_repository(
+        phase1_repository,
+        memory_root=memory,
+        observed_at="2026-07-19T10:00:00Z",
+    )
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    selected = phase1_repository / "docs" / "adr" / "ADR-001-events.md"
+    original = selected.read_bytes()
+    changed = original + b"\nChanged snapshot candidate.\n"
+    selected.write_bytes(changed)
+    ready = threading.Event()
+    resume = threading.Event()
+    real_publish = indexer_module.publish_snapshot
+
+    def pause_stale_publish(*args, **kwargs):
+        ready.set()
+        assert resume.wait(timeout=10)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(indexer_module, "publish_snapshot", pause_stale_publish)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        stale = pool.submit(
+            _capture_index_outcome,
+            phase1_repository,
+            memory,
+        )
+        assert ready.wait(timeout=10)
+        selected.write_bytes(original)
+        winner = index_repository(
+            phase1_repository,
+            memory_root=memory,
+            observed_at="2026-07-19T11:00:00Z",
+        )
+        selected.write_bytes(changed)
+        winner_pointer = project.current_path.read_bytes()
+        winner_ledger = project.observations_path.read_bytes()
+        resume.set()
+        outcome = stale.result(timeout=10)
+    assert winner.reused is True
+    assert isinstance(outcome, RuntimeError)
+    assert "selected state changed" in str(outcome)
+    assert project.current_path.read_bytes() == winner_pointer
+    assert project.observations_path.read_bytes() == winner_ledger
+
+
+def test_reuse_conflicts_with_same_snapshot_observation_update(
+    phase1_repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import architecture_graph.indexer as indexer_module
+
+    memory = tmp_path / "memory"
+    index_repository(
+        phase1_repository,
+        memory_root=memory,
+        observed_at="2026-07-19T10:00:00Z",
+    )
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    ready = threading.Event()
+    resume = threading.Event()
+    main_thread = threading.get_ident()
+    real_observe = indexer_module.observe_existing_snapshot
+
+    def pause_only_stale_reuse(*args, **kwargs):
+        if threading.get_ident() != main_thread:
+            ready.set()
+            assert resume.wait(timeout=10)
+        return real_observe(*args, **kwargs)
+
+    monkeypatch.setattr(
+        indexer_module,
+        "observe_existing_snapshot",
+        pause_only_stale_reuse,
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        stale = pool.submit(
+            index_repository,
+            phase1_repository,
+            memory_root=memory,
+            observed_at="2026-07-19T11:00:00Z",
+        )
+        assert ready.wait(timeout=10)
+        winner = index_repository(
+            phase1_repository,
+            memory_root=memory,
+            observed_at="2026-07-19T12:00:00Z",
+        )
+        winner_pointer = project.current_path.read_bytes()
+        winner_ledger = project.observations_path.read_bytes()
+        resume.set()
+        with pytest.raises(RuntimeError, match="selected state changed"):
+            stale.result(timeout=10)
+    assert winner.reused is True
+    assert project.current_path.read_bytes() == winner_pointer
+    assert project.observations_path.read_bytes() == winner_ledger
+
+
+@pytest.mark.parametrize(
+    ("component", "operation"),
+    [
+        ("current.json", "read"),
+        (".publish.lock", "lock"),
+    ],
+)
+def test_reserved_fifo_swap_after_storage_open_fails_without_blocking(
+    phase1_repository: Path,
+    tmp_path: Path,
+    component: str,
+    operation: str,
+) -> None:
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    target = project.project_dir / component
+    with ProjectStorage(project, create=False) as storage:
+        target.unlink()
+        os.mkfifo(target)
+        with pytest.raises(RepositoryStateError, match="regular file"):
+            if operation == "read":
+                storage.read_regular_bytes((component,))
+            else:
+                descriptor = storage.lock_descriptor()
+                os.close(descriptor)
+
+
+def test_snapshot_reader_borrows_storage_and_reopens_without_fd_growth(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    memory = tmp_path / "memory"
+    result = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    with ProjectStorage(project, create=False) as storage:
+        borrowed = SnapshotReader.open(
+            project, result.snapshot_id, storage=storage
+        )
+        assert list(borrowed.iter("sources"))
+    with pytest.raises(RepositoryStateError, match="context is closed"):
+        list(borrowed.iter("sources"))
+
+    descriptors_before = len(os.listdir("/dev/fd"))
+    for _ in range(25):
+        assert list(SnapshotReader.open(project).iter("sources"))
+    assert len(os.listdir("/dev/fd")) <= descriptors_before + 1
+
+
+def test_borrowed_reader_rejects_payload_redirect_after_open(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    memory = tmp_path / "memory"
+    result = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(b'{"outside":true}\n')
+    outside_before = outside.read_bytes()
+    payload = project.snapshots_dir / result.snapshot_id.split(":", 1)[1]
+    payload = payload / "sources.jsonl"
+    with ProjectStorage(project, create=False) as storage:
+        reader = SnapshotReader.open(
+            project, result.snapshot_id, storage=storage
+        )
+        payload.unlink()
+        payload.symlink_to(outside)
+        with pytest.raises(RepositoryStateError, match="regular file"):
+            list(reader.iter("sources"))
+    assert outside.read_bytes() == outside_before
+
+
+def test_selected_observation_row_is_part_of_publication_cas(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    memory = tmp_path / "memory"
+    result = index_repository(
+        phase1_repository,
+        memory_root=memory,
+        observed_at="2026-07-19T10:00:00Z",
+    )
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    guard_called = False
+
+    def guard() -> dict[str, object]:
+        nonlocal guard_called
+        guard_called = True
+        return observation("2026-07-19T11:00:00Z")
+
+    with ProjectStorage(project, create=False) as storage:
+        expected = read_current_pointer_state(storage)
+        raw = storage.read_regular_bytes(("observations.jsonl",))
+        assert raw is not None
+        records = [json.loads(line) for line in raw.splitlines()]
+        selected_id = str(expected.value["observation_id"])
+        selected_index = next(
+            index
+            for index, record in enumerate(records)
+            if record["id"] == selected_id
+        )
+        selected = records[selected_index]
+        records[selected_index] = finalize_record(
+            {
+                **{
+                    key: value
+                    for key, value in selected.items()
+                    if key != "content_digest"
+                },
+                "branch": "release",
+            }
+        )
+        mutated_ledger = b"".join(canonical_bytes(item) for item in records)
+        storage.atomic_replace_bytes(
+            ("observations.jsonl",), mutated_ledger
+        )
+        pointer_before = storage.read_regular_bytes(("current.json",))
+        ledger_before = storage.read_regular_bytes(("observations.jsonl",))
+        reader = SnapshotReader.open(
+            project, result.snapshot_id, storage=storage
+        )
+        with pytest.raises(RepositoryStateError, match="selected state changed"):
+            observe_existing_snapshot(
+                project,
+                storage,
+                reader,
+                observation("2026-07-19T11:00:00Z"),
+                expected,
+                guard,
+            )
+        assert storage.read_regular_bytes(("current.json",)) == pointer_before
+        assert (
+            storage.read_regular_bytes(("observations.jsonl",))
+            == ledger_before
+        )
+    assert guard_called is False
+
+
+def test_repository_mutation_after_ledger_preparation_is_rejected(
+    phase1_repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    pointer_before = project.current_path.read_bytes()
+    ledger_before = project.observations_path.read_bytes()
+    selected = phase1_repository / "docs" / "adr" / "ADR-001-events.md"
+    selected.write_text(selected.read_text() + "\nCandidate change.\n")
+    real_prepare = ProjectStorage.prepare_atomic_replace_bytes
+    mutated = False
+
+    def mutate_after_ledger_copy(self, components, prefix):
+        nonlocal mutated
+        prepared = real_prepare(self, components, prefix)
+        if tuple(components) == ("observations.jsonl",) and not mutated:
+            mutated = True
+            selected.write_text(selected.read_text() + "\nLate change.\n")
+        return prepared
+
+    monkeypatch.setattr(
+        ProjectStorage,
+        "prepare_atomic_replace_bytes",
+        mutate_after_ledger_copy,
+    )
+    with pytest.raises(RepositoryStateError, match="changed during indexing"):
+        index_repository(phase1_repository, memory_root=memory)
+    assert mutated is True
+    assert project.current_path.read_bytes() == pointer_before
+    assert project.observations_path.read_bytes() == ledger_before
+    assert not any(
+        path.name.startswith(".observations.jsonl.")
+        for path in project.project_dir.iterdir()
+    )
+
+
+def test_current_rename_sync_failure_reports_uncertain_commit(
+    phase1_repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    import architecture_graph.project as project_module
+
+    memory = tmp_path / "memory"
+    index_repository(
+        phase1_repository,
+        memory_root=memory,
+        observed_at="2026-07-19T10:00:00Z",
+    )
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    pointer_before = project.current_path.read_bytes()
+    real_replace = project_module.os.replace
+    real_fsync = project_module.os.fsync
+    current_replaced = False
+
+    def mark_current_replace(source, target, *args, **kwargs):
+        nonlocal current_replaced
+        result = real_replace(source, target, *args, **kwargs)
+        if target == "current.json":
+            current_replaced = True
+        return result
+
+    def fail_sync_after_current(descriptor):
+        nonlocal current_replaced
+        if current_replaced:
+            current_replaced = False
+            raise OSError("simulated post-rename directory sync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(project_module.os, "replace", mark_current_replace)
+    monkeypatch.setattr(project_module.os, "fsync", fail_sync_after_current)
+    with pytest.raises(PublicationCommitUncertain, match="indeterminate"):
+        index_repository(
+            phase1_repository,
+            memory_root=memory,
+            observed_at="2026-07-19T11:00:00Z",
+        )
+    assert project.current_path.read_bytes() != pointer_before
+
+
+def test_storage_cleanup_failures_do_not_leak_descriptors(
+    phase1_repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    import architecture_graph.project as project_module
+
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    with ProjectStorage(project, create=False) as storage:
+        descriptors_before = len(os.listdir("/dev/fd"))
+        real_fstat = project_module.os.fstat
+        real_fsync = project_module.os.fsync
+        failed = False
+
+        def fail_opened_file_fstat(descriptor):
+            nonlocal failed
+            if descriptor != storage.project_fd and not failed:
+                failed = True
+                raise OSError("simulated fstat failure")
+            return real_fstat(descriptor)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(project_module.os, "fstat", fail_opened_file_fstat)
+            with pytest.raises(OSError, match="fstat failure"):
+                storage.read_regular_bytes(("current.json",))
+        assert len(os.listdir("/dev/fd")) == descriptors_before
+
+        real_replace = project_module.os.replace
+        real_unlink = project_module.os.unlink
+
+        def fail_replace(*args, **kwargs):
+            raise OSError("primary replace failure")
+
+        def fail_temporary_unlink(name, *args, **kwargs):
+            if str(name).startswith(".PROJECT.json."):
+                raise OSError("cleanup unlink failure")
+            return real_unlink(name, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(project_module.os, "replace", fail_replace)
+            patch.setattr(project_module.os, "unlink", fail_temporary_unlink)
+            with pytest.raises(OSError, match="primary replace failure") as caught:
+                storage.atomic_replace_bytes(("PROJECT.json",), b"{}\n")
+        assert any("cleanup unlink failed" in note for note in caught.value.__notes__)
+        assert len(os.listdir("/dev/fd")) == descriptors_before
+        for leftover in project.project_dir.glob(".PROJECT.json.*"):
+            leftover.unlink()
+
+        real_directory_fd = ProjectStorage.directory_fd
+        staging_fd: int | None = None
+
+        def remember_staging_fd(self, components, *, create=False):
+            nonlocal staging_fd
+            descriptor = real_directory_fd(self, components, create=create)
+            if tuple(components) == (".staging",):
+                staging_fd = descriptor
+            return descriptor
+
+        def fail_stage_parent_sync(descriptor):
+            if descriptor == staging_fd:
+                raise OSError("simulated stage parent sync failure")
+            return real_fsync(descriptor)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(ProjectStorage, "directory_fd", remember_staging_fd)
+            patch.setattr(project_module.os, "fsync", fail_stage_parent_sync)
+            with pytest.raises(OSError, match="stage parent sync failure"):
+                storage.create_stage()
+        assert not any((project.project_dir / ".staging").iterdir())
+        assert len(os.listdir("/dev/fd")) == descriptors_before
+
+        stage = storage.create_stage()
+        storage.write_stage_file(stage, "one.jsonl", b"{}\n")
+        storage.write_stage_file(stage, "two.jsonl", b"{}\n")
+        failed = False
+
+        def fail_one_stage_unlink(name, *args, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("simulated partial stage unlink failure")
+            return real_unlink(name, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(project_module.os, "unlink", fail_one_stage_unlink)
+            with pytest.raises(OSError, match="partial stage unlink failure"):
+                storage.remove_stage(stage)
+        assert len(os.listdir("/dev/fd")) == descriptors_before
+        storage.remove_stage(stage)
 ```
 
 - [ ] **Step 7: Add `index` CLI parsing and dispatch**
@@ -9206,8 +11467,15 @@ The focused acceptance matrix must include:
 | --- | --- |
 | Observation commit | null, lowercase SHA-1, lowercase SHA-256 accepted; empty/short/uppercase/non-hex rejected before both publish and reuse writes |
 | Competing lineage | move-plus-replacement, no-added overwrite, and byte swap bind every target's complete direct-origin map into `input_digest`; ordinary edits retain continuity and unchanged-origin copies remain ordinary additions without lineage warnings |
-| Project identity Git read | non-UTF-8 remote, executable failure, and non-optional Git failure become `RepositoryStateError` |
-| Memory storage path | file-valued and simulated unwritable roots return 2 with empty stdout, one diagnostic, and no pointer mutation in human and JSON modes |
+| Manifest-authoritative continuity | repeated configured-untracked and staged-add Git facts cannot promote unchanged paths during an unrelated deletion; genuine dirty additions remain candidates; an unchanged equal-byte local path retains continuity while the isolated new/old pair moves |
+| Project identity Git read | non-UTF-8 remote, executable failure, and non-optional Git failure become `RepositoryStateError`; normalized remote/project ID are captured in the stable token and a late remote change cannot fork history |
+| Memory storage boundary | direct in-repository roots, root redirects, redirected/file-valued project entries, and every reserved-component redirect or wrong type fail closed; file-valued and simulated unwritable roots return 2 with empty stdout, one diagnostic, and no pre-commit pointer mutation in human and JSON modes |
+| Anchored reader/open | payload redirection after open fails without touching outside bytes; a borrowed reader fails deliberately after context close; repeated compatibility reads do not grow descriptors; raced FIFOs fail nonblocking |
+| Selected-state CAS | pointer-only same-snapshot observation winners conflict, and changing only the canonical selected observation row while keeping `current.json` byte-identical conflicts before the guard or durable publication |
+| Late repository guard | source mutation after real staging, immutable reuse validation, or complete ledger preparation fails with unchanged ledger/pointer and cleaned temporary state |
+| Reuse result preflight | source, segment, and warning counts all materialize before final validation or observation publication; an injected count `OSError` preserves ledger/pointer and CLI framing |
+| Publication failure boundary | prepared-ledger, fstat, temporary-unlink, stage-sync, and partial-stage cleanup failures do not leak descriptors; current-rename post-sync failure raises `PublicationCommitUncertain` and does not claim rollback |
+| Exact schema types | every version boundary rejects JSON `true` even though Python booleans are integer subclasses |
 | Dirty fingerprint | repeated same-path staged `MM` changes with fixed worktree bytes, worktree changes, untracked changes, and regular/symlink type changes all change the digest |
 
 Expected: the focused tests pass, the complete suite passes, and compileall exits 0.
@@ -9215,7 +11483,7 @@ Expected: the focused tests pass, the complete suite passes, and compileall exit
 - [ ] **Step 10: Commit deterministic indexing**
 
 ```bash
-git add scripts/architecture_graph/config.py scripts/architecture_graph/project.py scripts/architecture_graph/snapshot.py scripts/architecture_graph/indexer.py scripts/architecture_graph/cli.py tests/conftest.py tests/fixtures/phase1_repo/.architecture-graph.yaml tests/test_sources.py tests/test_snapshot.py tests/test_phase1_cli.py
+git add scripts/architecture_graph/config.py scripts/architecture_graph/project.py scripts/architecture_graph/jsonl_store.py scripts/architecture_graph/snapshot.py scripts/architecture_graph/indexer.py scripts/architecture_graph/cli.py tests/conftest.py tests/fixtures/phase1_repo/.architecture-graph.yaml tests/test_sources.py tests/test_snapshot.py tests/test_phase1_cli.py
 git commit -m "feat: index deterministic architecture sources"
 ```
 
