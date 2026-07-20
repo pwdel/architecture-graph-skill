@@ -1076,8 +1076,10 @@ Source-version identity and logical-source identity remain separate:
 - logical_source_id uses an explicit ADR or document identifier when present;
 - repeated occurrences of one explicit identifier share that logical ID only when their content hashes match; the same identifier on different bytes fails before publication;
 - otherwise genesis hashes project identity, prior snapshot/genesis marker, relative path, and content hash, while each immutable source record carries the resulting logical ID;
-- the next index resolves the selected layer to its base deterministic analysis parent, reads path-to-logical-ID state only from that immutable parent, uses Git to identify added/deleted candidates, compares every eligible pair with the versioned exact 60-percent line-sequence threshold, and moves a logical ID only for a unique non-competing best match;
-- ambiguous rename matches create removal and addition plus a warning.
+- the next index resolves the selected layer to its base deterministic analysis parent, reads path-to-logical-ID and exact content-digest state only from that immutable parent, and obtains its Git baseline only from the observation selected by authoritative `current.json`; orphan observations never participate;
+- Phase 1 forms added/deleted candidates from the union of Git facts and parent/current selected-manifest path deltas, which allows configured-untracked paths to participate, then compares each current target digest only with exact parent source-record digests;
+- a logical ID moves only for a unique non-competing exact target-origin assignment. Tied exact assignments are ambiguous, while candidates without an exact match are unresolved; Phase 1 has no similarity fallback because snapshots do not persist parent raw bytes;
+- ambiguous and unresolved cases both create removal and addition plus a warning. Canonical unique-pair, tied, and unresolved cases all enter the deterministic snapshot `input_digest`.
 
 `PROJECT.json` stores only immutable project identity/root metadata. It is never an append-only path history, so an orphaned failed publication cannot poison later logical-source resolution and a path reused after a rename receives a new logical ID.
 
