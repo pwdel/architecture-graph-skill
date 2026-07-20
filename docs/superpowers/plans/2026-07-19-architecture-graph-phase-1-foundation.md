@@ -6310,7 +6310,7 @@ git commit -m "feat: ingest structured and configured text sources"
 - Adds CLI command: `architecture-graph index ROOT [--memory-root PATH] [--config PATH] [--json]`.
 - An absent implicit `ROOT/.architecture-graph.yaml` selects `ProjectConfig()` defaults. An explicit `--config` is resolved against `ROOT` when relative and must be a readable regular file; missing, unreadable, and directory-valued explicit paths are user-state failures. The CLI writes no stdout, writes one concise diagnostic to stderr, returns 2, and never changes `current.json` for these failures.
 - Publication and reuse accept a null commit or a lowercase 40/64-hex Git object ID only. The same shared validator runs before staging/locking and when the authoritative selected observation becomes a lineage baseline.
-- Resolves source lineage only against the deterministic analysis parent named by the observation selected in authoritative `current.json`. The selected observation is shape/content validated and must name the selected snapshot and the same base deterministic snapshot; orphan ledger rows are ignored. Its commit is the only Git baseline. Git status candidates are unioned with parent/current selected-manifest path deltas so configured-untracked renames participate. Git never supplies parent bytes: every current candidate is compared only with the exact `content_hash` persisted on the parent source record. Only a unique non-competing exact assignment is accepted. Tied exact matches, including an added exact-digest target competing with changed same-path continuity, are ambiguous; non-exact matches are unresolved because Phase 1 has no similarity fallback. Ambiguous current successors conservatively receive add/remove identities and warnings without degrading parse status. Canonical pairs, all ambiguous target-origin maps, and unresolved cases enter `input_digest`.
+- Resolves source lineage only against the deterministic analysis parent named by the observation selected in authoritative `current.json`. The selected observation is shape/content validated and must name the selected snapshot and the same base deterministic snapshot; orphan ledger rows are ignored. Its commit is the only Git baseline. Git status candidates are unioned with parent/current selected-manifest path deltas so configured-untracked renames participate. The deterministic candidate graph spans current added/changed targets and prior deleted/changed origins, with same-path continuity edges plus cross-path exact-digest edges based only on persisted parent `content_hash` values. An isolated continuity edge retains the path ID; an isolated exact edge is the only accepted rename. Every target in a competing component becomes ambiguous with its complete sorted direct-origin set. Only an added target without an exact edge may be unresolved, and only when a deleted origin exists; Phase 1 has no similarity fallback. Ambiguous current successors conservatively receive add/remove identities and warnings without degrading parse status. Canonical pairs, complete ambiguous target-origin maps, and unresolved cases enter `input_digest`.
 - `dirty_fingerprint` is an observation-only digest over a versioned canonical preimage containing full file type/mode, status, path, and independent exact staged/worktree/untracked content digests. Repeated same-path staged `MM`, worktree, untracked, regular-file, and symlink states are distinguished. Snapshot identity excludes branch, commit, dirty state, and time.
 - Project identity obtains the remote through the same binary, strict UTF-8 Git boundary as other observations. Executable, command, remote-decoding, status-decoding, and path-decoding failures become `RepositoryStateError`.
 - Repository indexing uses a content-sensitive read window. Configuration bytes, fully materialized configuration, selected path/content facts, Git identity, and the versioned dirty preimage must match in two consecutive captures and again immediately before reuse/publication. A concurrent mutation raises a user-state error before pointer replacement; it never publishes inputs from one state with observation provenance from another.
@@ -7621,47 +7621,43 @@ def _git_rename_resolution(
         for path in new_paths.intersection(prior_paths)
         if current_content_hashes[path] != prior_content_hashes[path]
     }
-    tentative: dict[str, str] = {}
-    ambiguous_sets: dict[str, set[str]] = {}
-    for new in sorted(added):
-        candidates = tuple(
-            old
-            for old in sorted(deleted | changed_same_paths)
-            if prior_content_hashes[old] == current_content_hashes[new]
+    candidate_targets = added | changed_same_paths
+    candidate_origins = deleted | changed_same_paths
+    direct_origins: dict[str, tuple[str, ...]] = {}
+    for target in sorted(candidate_targets):
+        origins: set[str] = set()
+        if target in changed_same_paths:
+            origins.add(target)
+        origins.update(
+            origin
+            for origin in candidate_origins
+            if origin != target
+            and prior_content_hashes[origin] == current_content_hashes[target]
         )
-        if not candidates:
-            continue
-        competing_same_paths = tuple(
-            old for old in candidates if old in changed_same_paths
-        )
-        if competing_same_paths:
-            ambiguous_sets.setdefault(new, set()).update(candidates)
-            for old in competing_same_paths:
-                ambiguous_sets.setdefault(old, set()).add(old)
-            continue
-        if len(candidates) == 1:
-            tentative[new] = candidates[0]
-        else:
-            ambiguous_sets.setdefault(new, set()).update(candidates)
+        if origins:
+            direct_origins[target] = tuple(sorted(origins))
 
-    pairs: dict[str, str] = {}
-    claimed_by_old: dict[str, list[str]] = {}
-    for new, old in tentative.items():
-        claimed_by_old.setdefault(old, []).append(new)
-    for old, claims in sorted(claimed_by_old.items()):
-        if len(claims) == 1:
-            pairs[claims[0]] = old
-        else:
-            for new in sorted(claims):
-                ambiguous_sets.setdefault(new, set()).add(old)
-    ambiguous = {
-        target: tuple(sorted(origins))
-        for target, origins in sorted(ambiguous_sets.items())
+    origin_degree = {
+        origin: sum(origin in origins for origins in direct_origins.values())
+        for origin in sorted(candidate_origins)
     }
+    pairs: dict[str, str] = {}
+    ambiguous: dict[str, tuple[str, ...]] = {}
+    for target, origins in sorted(direct_origins.items()):
+        isolated = len(origins) == 1 and origin_degree[origins[0]] == 1
+        if isolated and target == origins[0]:
+            continue
+        if isolated:
+            pairs[target] = origins[0]
+        else:
+            ambiguous[target] = origins
     unresolved = {
         new: tuple(sorted(deleted))
         for new in sorted(added)
-        if deleted and new not in pairs and new not in ambiguous
+        if deleted
+        and new not in direct_origins
+        and new not in pairs
+        and new not in ambiguous
     }
     return RenameResolution(
         dict(sorted(pairs.items())),
@@ -8355,6 +8351,23 @@ def _source_at(reader: SnapshotReader, path: str) -> dict[str, object]:
     return next(item for item in reader.iter("sources") if item["path"] == path)
 
 
+def _assert_rename_input_digest(
+    reader: SnapshotReader,
+    analysis_parent_snapshot_id: str,
+    resolution: RenameResolution,
+) -> None:
+    assert reader.manifest["input_digest"] == sha256_digest(
+        canonical_bytes(
+            {
+                "material_input_digest": reader.manifest["material_input_digest"],
+                "source_revision_digest": reader.manifest["source_revision_digest"],
+                "analysis_parent_snapshot_id": analysis_parent_snapshot_id,
+                "rename_resolution": resolution.as_digest_input(),
+            }
+        )
+    )
+
+
 def test_configured_untracked_exact_rename_uses_manifest_delta(
     phase1_repository: Path, tmp_path: Path
 ) -> None:
@@ -8434,15 +8447,190 @@ def test_same_transition_move_and_old_path_replacement_is_ambiguous(
         },
         {},
     )
-    assert reader.manifest["input_digest"] == sha256_digest(
-        canonical_bytes(
-            {
-                "material_input_digest": reader.manifest["material_input_digest"],
-                "source_revision_digest": reader.manifest["source_revision_digest"],
-                "analysis_parent_snapshot_id": first.snapshot_id,
-                "rename_resolution": resolution.as_digest_input(),
-            }
+    _assert_rename_input_digest(reader, first.snapshot_id, resolution)
+
+
+def test_no_added_overwrite_maps_continuity_and_exact_origins(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    from conftest import git
+
+    p_relative = "docs/architecture/p.md"
+    q_relative = "docs/architecture/q.md"
+    p_path = phase1_repository / p_relative
+    q_path = phase1_repository / q_relative
+    p_path.parent.mkdir(parents=True, exist_ok=True)
+    p_path.write_text("# P\n\nOriginal X bytes.\n")
+    q_path.write_text("# Q\n\nOriginal Y bytes.\n")
+    git(phase1_repository, "add", p_relative, q_relative)
+    git(phase1_repository, "commit", "-m", "add overwrite origins")
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    parent = SnapshotReader.open(project, first.snapshot_id)
+    parent_ids = {
+        _source_at(parent, path)["logical_source_id"]
+        for path in (p_relative, q_relative)
+    }
+
+    q_bytes = q_path.read_bytes()
+    git(phase1_repository, "rm", q_relative)
+    p_path.write_bytes(q_bytes)
+    git(phase1_repository, "add", p_relative)
+    git(phase1_repository, "commit", "-m", "overwrite p with q bytes")
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    current = _source_at(reader, p_relative)
+    assert current["logical_source_id"] not in parent_ids
+    assert current["parse_status"] == "complete"
+    warnings = [
+        item for item in reader.iter("warnings") if item["code"] == "ambiguous_rename"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["source_version_id"] == current["id"]
+    assert warnings[0]["id"] in current["warning_ids"]
+    resolution = RenameResolution(
+        {},
+        {p_relative: (p_relative, q_relative)},
+        {},
+    )
+    _assert_rename_input_digest(reader, first.snapshot_id, resolution)
+
+
+def test_byte_swap_records_complete_direct_candidate_map(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    from conftest import git
+
+    p_relative = "docs/architecture/p.md"
+    q_relative = "docs/architecture/q.md"
+    p_path = phase1_repository / p_relative
+    q_path = phase1_repository / q_relative
+    p_path.parent.mkdir(parents=True, exist_ok=True)
+    p_path.write_text("# P\n\nOriginal X bytes.\n")
+    q_path.write_text("# Q\n\nOriginal Y bytes.\n")
+    git(phase1_repository, "add", p_relative, q_relative)
+    git(phase1_repository, "commit", "-m", "add swap origins")
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    parent = SnapshotReader.open(project, first.snapshot_id)
+    parent_ids = {
+        _source_at(parent, path)["logical_source_id"]
+        for path in (p_relative, q_relative)
+    }
+
+    p_bytes = p_path.read_bytes()
+    q_bytes = q_path.read_bytes()
+    p_path.write_bytes(q_bytes)
+    q_path.write_bytes(p_bytes)
+    git(phase1_repository, "add", p_relative, q_relative)
+    git(phase1_repository, "commit", "-m", "swap source bytes")
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    current = {
+        path: _source_at(reader, path) for path in (p_relative, q_relative)
+    }
+    assert len({source["logical_source_id"] for source in current.values()}) == 2
+    assert all(
+        source["logical_source_id"] not in parent_ids
+        for source in current.values()
+    )
+    assert all(source["parse_status"] == "complete" for source in current.values())
+    warnings = [
+        item for item in reader.iter("warnings") if item["code"] == "ambiguous_rename"
+    ]
+    assert len(warnings) == 2
+    assert {item["source_version_id"] for item in warnings} == {
+        current[p_relative]["id"],
+        current[q_relative]["id"],
+    }
+    assert all(
+        any(
+            warning["id"] in source["warning_ids"]
+            for warning in warnings
+            if warning["source_version_id"] == source["id"]
         )
+        for source in current.values()
+    )
+    origins = (p_relative, q_relative)
+    resolution = RenameResolution(
+        {},
+        {p_relative: origins, q_relative: origins},
+        {},
+    )
+    _assert_rename_input_digest(reader, first.snapshot_id, resolution)
+
+
+def test_ordinary_same_path_edit_retains_continuity_without_warning(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    from conftest import git
+
+    relative = "docs/architecture/continuity.md"
+    path = phase1_repository / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Continuity\n\nOriginal bytes.\n")
+    git(phase1_repository, "add", relative)
+    git(phase1_repository, "commit", "-m", "add continuity source")
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    parent = _source_at(SnapshotReader.open(project, first.snapshot_id), relative)
+
+    path.write_text("# Continuity\n\nEdited bytes.\n")
+    git(phase1_repository, "add", relative)
+    git(phase1_repository, "commit", "-m", "edit continuity source")
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    current = _source_at(reader, relative)
+    assert current["logical_source_id"] == parent["logical_source_id"]
+    assert current["parse_status"] == "complete"
+    assert not any(
+        item["code"] in {"ambiguous_rename", "unresolved_rename"}
+        for item in reader.iter("warnings")
+    )
+    _assert_rename_input_digest(
+        reader, first.snapshot_id, RenameResolution({}, {}, {})
+    )
+
+
+def test_unchanged_origin_copy_is_add_without_false_rename_warning(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    from conftest import git
+
+    origin_relative = "docs/architecture/origin.md"
+    copy_relative = "docs/architecture/copy.md"
+    origin_path = phase1_repository / origin_relative
+    copy_path = phase1_repository / copy_relative
+    origin_path.parent.mkdir(parents=True, exist_ok=True)
+    origin_path.write_text("# Shared bytes\n\nWorkers use the queue.\n")
+    git(phase1_repository, "add", origin_relative)
+    git(phase1_repository, "commit", "-m", "add unchanged origin")
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    parent = _source_at(
+        SnapshotReader.open(project, first.snapshot_id), origin_relative
+    )
+
+    copy_path.write_bytes(origin_path.read_bytes())
+    git(phase1_repository, "add", copy_relative)
+    git(phase1_repository, "commit", "-m", "copy unchanged origin")
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    origin = _source_at(reader, origin_relative)
+    copied = _source_at(reader, copy_relative)
+    assert origin["logical_source_id"] == parent["logical_source_id"]
+    assert copied["logical_source_id"] != parent["logical_source_id"]
+    assert origin["parse_status"] == copied["parse_status"] == "complete"
+    assert not any(
+        item["code"] in {"ambiguous_rename", "unresolved_rename"}
+        for item in reader.iter("warnings")
+    )
+    _assert_rename_input_digest(
+        reader, first.snapshot_id, RenameResolution({}, {}, {})
     )
 
 
@@ -9017,7 +9205,7 @@ The focused acceptance matrix must include:
 | Boundary | Required cases |
 | --- | --- |
 | Observation commit | null, lowercase SHA-1, lowercase SHA-256 accepted; empty/short/uppercase/non-hex rejected before both publish and reuse writes |
-| Competing lineage | one-transition move plus old-path replacement gives neither path-fallback successor the parent logical ID, warns both, preserves complete parse status, and binds the whole ambiguous map into `input_digest` |
+| Competing lineage | move-plus-replacement, no-added overwrite, and byte swap bind every target's complete direct-origin map into `input_digest`; ordinary edits retain continuity and unchanged-origin copies remain ordinary additions without lineage warnings |
 | Project identity Git read | non-UTF-8 remote, executable failure, and non-optional Git failure become `RepositoryStateError` |
 | Memory storage path | file-valued and simulated unwritable roots return 2 with empty stdout, one diagnostic, and no pointer mutation in human and JSON modes |
 | Dirty fingerprint | repeated same-path staged `MM` changes with fixed worktree bytes, worktree changes, untracked changes, and regular/symlink type changes all change the digest |
