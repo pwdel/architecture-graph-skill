@@ -910,6 +910,12 @@ the context open a one-shot anchored context for the complete open operation or
 JSONL-generator lifetime and close it before returning or exhausting the
 generator. `iter`, `get`, and `select` open snapshot payloads relative to the
 held project descriptor and never reopen a project-owned path by pathname.
+Each integrity pass reads a fixed payload once into one byte image, compares
+that image with the digest in `manifest.payload_files`, and parses those exact
+bytes. Reader operations repeat that binding before yielding a record, so a
+canonical regular-file substitution after `SnapshotReader.open()` fails as a
+snapshot-integrity error; `get` and `select` inherit the same guarantee through
+`iter`.
 
 The implementation uses the small jsonlines package for record framing and streaming reads/writes; the canonical serializer supplies validation and deterministic key ordering. The Python standard library handles small manifest files. The ijson package remains an adapter dependency only if a future source format requires streaming a large nested JSON document.
 
@@ -933,7 +939,19 @@ Writers target a temporary staging directory. Finalization:
 
 Phase 1 deterministic indexing tightens that generic sequence at its repository boundary. It validates the initial observation before staging. For changed material it completes and synchronizes staging, performs immutable collision verification, and removes a redundant collision stage before the final repository-token guard. For reuse it computes every result count first and revalidates the complete immutable snapshot under lock before the guard. Both branches parse, validate, and ID-index the complete observation ledger and copy its validated bytes to a synchronized anchored temporary file before the guard. The guard then rechecks source/configuration/Git/project-identity state and returns the final observation. After it, the publisher validates and serializes only that bounded row, appends it to the prepared file, installs a new snapshot when needed, and performs the project-metadata, ledger, and pointer replacements. No corpus or ledger parse/copy occurs after the guard.
 
+Creation of every anchored storage directory synchronizes its parent before
+descent, including the genesis `projects/<project-id>` entry. Temporary-file
+and staging cleanup tracks ownership explicitly: an `O_EXCL` collision never
+unlinks an unowned sibling, and a stage is not returned until its parent
+descriptor closes successfully. Cleanup failures annotate a precommit primary
+exception instead of replacing it.
+
 Pre-publication containment, count, read, validation, selected-state CAS, ledger-preparation, and final-guard failures leave both the observation ledger and current pointer unchanged. Once durable writes begin, an installed immutable snapshot or a failure after step 14 may leave an unselected snapshot or observation, which is safe because current.json remains authoritative. The `os.replace()` that installs `current.json` is the flat-file commit point. A failure before it preserves the old selection; a directory-sync or lock-release failure after a successful replace has an explicitly indeterminate committed/durability outcome, may already expose the new selection, and must not be blindly retried. `PublicationCommitUncertain` reports that uncertainty in the active command. A later status command can validate the state and report the selected pointer and any orphans it actually observes, but without a durable transaction marker it cannot reconstruct whether an earlier sync completed. The flat files do not pretend to provide a multi-file database transaction.
+
+The project-storage context records pointer replacement at the replace itself;
+a later lock-release or outer descriptor-close failure is therefore also
+reported as `PublicationCommitUncertain`. A body error raised before the
+pointer commit remains the primary exception and receives cleanup notes.
 
 Finalized snapshots are immutable. Indexing, LLM enrichment, and changed human review sets create new snapshots.
 
