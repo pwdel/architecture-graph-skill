@@ -159,8 +159,8 @@ The indexer locates eligible files and records:
 
 - path relative to the repository root;
 - source kind and configured authority class;
-- Git blob hash when available;
-- content hash for dirty or untracked selected files;
+- Git-object hash of the exact selected working-tree bytes for tracked files, never a stale index-entry blob;
+- content hash for every selected file, including dirty and untracked inputs;
 - ADR metadata such as identifier, title, date, and status;
 - parser and extractor versions;
 - deterministic pipeline digest;
@@ -276,7 +276,7 @@ The normalizer maps surface predicates to a controlled architecture vocabulary w
 - trades_off_with;
 - justified_by.
 
-Entity resolution uses exact identifiers, declared aliases, acronym evidence, structural context, and conservative similarity. Unresolved aliases remain separate candidates. An LLM may propose a merge, but the proposal stays visible and cannot collapse deterministic entities until a rule or human review accepts it.
+Entity resolution uses exact identifiers, declared aliases, acronym evidence, structural context, and conservative similarity. Unresolved aliases remain separate candidates. An LLM may propose a merge, but the proposal stays visible and cannot collapse deterministic entities until a versioned merge cascade exists. V1 human review may discuss or reject that proposal; it cannot materialize it by acceptance.
 
 ### 7. Decision construction
 
@@ -292,7 +292,7 @@ The reducer applies these rules in order:
 6. Options or Alternatives sections attach option claims.
 7. Consequences, Tradeoffs, Risks, and Outcomes sections attach consequence claims.
 8. Status and supersession metadata attach to the decision record. Selected decision and constraint claims become active, options become considered or rejected, and rationale, context, and consequence claims become contextual.
-9. Cross-source records merge into one decision only when they share an explicit decision identifier, or when their canonical primary claim keys and normalized scopes match exactly.
+9. Cross-source records merge into one decision only when they share a unique exact explicit-identifier/local-anchor key, or when their canonical primary claim keys and normalized scopes match exactly with at most one candidate anchor per logical source. Ambiguous many-to-many clusters do not merge. A valid cluster keeps the lexicographically smallest full candidate identity and records the others as aliases. One ADR with two distinct local Decision headings therefore remains two decisions despite the shared ADR identifier.
 10. Other similar decisions remain separate and receive SUPPORTS, CONTRADICTS, or ALIAS_CANDIDATE edges when deterministic rules can establish those relationships.
 
 A decision can connect:
@@ -349,6 +349,14 @@ Example claim:
   },
   "claim_role": "constraint",
   "applicability": "active",
+  "claim_anchor": {
+    "logical_source_id": "logical-source:adr-0012",
+    "normalized_heading_path": ["decision"],
+    "canonical_tuple_ordinal": 0
+  },
+  "source_lineage": ["logical-source:adr-0012"],
+  "source_version_ids": ["source:4c2a..."],
+  "segment_id": "segment:1a9b...",
   "decision_ids": ["decision:adr-0012:publishing"],
   "assertion_kind": "extracted",
   "extraction_confidence": 0.91,
@@ -414,9 +422,13 @@ derivation_id
 
 proposal_kind is create_record, replace_field, add_alias, merge_entities, split_entity, link_decision, or rewrite_report_text. target_id and target_content_digest may be null only for create_record. field_path uses a JSON Pointer when the proposal changes one field and is null for whole-record, merge, and split proposals. A proposal identity hashes its derivation ID, target identity and content digest, proposal kind, field path, and canonical proposed-value digest.
 
-An accepted proposal creates a successor record in a new snapshot. A change to a content-only field keeps the stable identity key and records predecessor_content_digest. A change to an identity field creates a new stable ID and a predecessor-to-successor entry in lineage.jsonl. Entity merge and split proposals always create new entity identities and lineage; affected claim identities change when their canonical subject, predicate, object, or scope changes.
+V1 validates and preserves all seven proposal shapes for diagnosis, but automated accepted-successor materialization supports only `replace_field`. The other kinds may be rejected or discussed in review; `accept_proposal` for one of them fails validation until a versioned cascade rule exists. This prevents an unknown merge, split, record creation, decision link, alias, or report rewrite from acquiring semantics by accident.
 
-For claims, subject, predicate, object, normalized scope, and logical source lineage are identity fields. Modality, polarity, conditions, effective time, role, applicability, confidence, evidence, derivation, and field origins are content fields. Effective review status is a separate projection and is never an identity input. Each other record schema declares the same boundary: the identity inputs listed below are identity fields and every other field is content unless its schema says otherwise.
+Automated correction is narrower still. `correctable_fields_v1` permits only claim subject/object entity, context, or literal values; canonical predicate; modality, polarity, conditions, scope, and effective time; claim role and applicability; and entity type, canonical key, or declared scope. Exact JSON Pointers are versioned in the schema. IDs, kinds, digests, evidence, derivations, origins, ranks, source anchors, and all decision/ranking/term/warning/review/proposal fields are not directly correctable in V1. A corrected claim or entity is fully revalidated, records the field origin, and, when an identity input changes, receives a new ID and cascades through claims, decisions, and edges with explicit lineage.
+
+An accepted V1 `replace_field` proposal creates a successor record in a new snapshot. A change to a content-only field keeps the stable identity key and records predecessor_content_digest. A change to an identity field creates a new stable ID and a predecessor-to-successor entry in lineage.jsonl. If a later version implements entity merge/split acceptance, it must create new entity identities and cascade affected claim identities when canonical subject, predicate, object, or scope changes.
+
+For claims, subject, predicate, object, normalized scope, logical source lineage, and a stable local claim anchor are identity fields. The claim anchor contains the logical source ID, normalized heading path, and the source-order occurrence among claims with the same canonical subject-predicate-object-scope key under that heading. It lets simultaneous positive/negative or conditional assertions coexist without making surface wording or parser origin part of identity. Modality, polarity, conditions, effective time, role, applicability, confidence, evidence, derivation, and field origins are content fields. Effective review status is a separate projection and is never an identity input. Each other record schema declares the same boundary: the identity inputs listed below are identity fields and every other field is content unless its schema says otherwise.
 
 The successor carries field_origins that map each JSON Pointer to origin references of the form `{kind: derivation | review, id: ...}`. Copied deterministic fields therefore remain labeled deterministic, while an accepted LLM qualifier records both the LLM proposal derivation and the human acceptance review.
 
@@ -428,14 +440,17 @@ Unaccepted proposals appear only in the enriched provenance layer with the revie
 
 Every record has a stable identity key and a separate content digest. Diffs match identity keys and classify a changed content digest as a modification.
 
-- An evidence identity hashes the relative source path, source content hash, and source span.
+- An evidence identity hashes the relative source path, source content hash, source span, and segment ID. YAML aliases may attach one exact source span to several semantic paths, so each segment keeps a distinct evidence link without changing the quoted bytes.
 - A term identity hashes its normalized form and term kind.
 - An entity identity hashes its entity type, canonical key, and declared scope.
-- A claim identity hashes subject, predicate, object, scope, and source lineage. Its content digest also covers qualifiers, evidence, confidence, and derivation.
+- A claim identity hashes canonical subject, predicate, object, scope, logical source lineage, and the stable local claim anchor. Argument surface text and extraction origin are excluded. Its content digest also covers qualifiers, evidence, confidence, and derivation.
 - An explicit decision identity uses the ADR or source decision identifier plus its local decision anchor.
-- A non-ADR decision identity hashes the relative source path, heading anchor, and primary prescriptive claim key.
-- A merged cross-source decision keeps the lexicographically smallest explicit decision identity and records the other identities as aliases.
+- A non-ADR decision identity hashes the persistent logical source ID, heading anchor, and primary prescriptive claim key. Relative path remains provenance/content, not identity, so a verified rename can preserve the decision lineage.
+- Exact cross-source explicit-ID/local-anchor matches already share one identity. A merged non-ADR cross-source decision keeps the lexicographically smallest candidate identity and records the other distinct identities as aliases.
 - A derivation identity hashes producer kind, method, actual tool or model artifact identity, configuration digest, input IDs, output kind, and output identity key.
+- A review identity hashes reviewer ID, exact target kind/ID/content digest, field path, verdict, canonical replacement-value digest, sorted evidence IDs, authority-policy digest, superseded review ID, and canonical UTC event time. Exact duplicate events deduplicate; distinct times or explicit supersession remain separate ledger events.
+
+One versioned `decision_identity_payload` implements the two conditional decision branches above. Stable-ID construction, review successor classification, lineage, and diff all call it; none hashes the whole source-anchor object or its relative path.
 
 The snapshot digest hashes the canonical manifest core, the digests of every finalized JSONL file, and report.md. It excludes current.json, wall-clock publication metadata, and the manifest field that stores the completed digest. This avoids circular identifiers and preserves reproducible deterministic snapshots.
 
@@ -454,7 +469,10 @@ Core node kinds:
 - evidence span;
 - source version;
 - derivation;
-- snapshot.
+- proposal;
+- review.
+
+Snapshot identity remains manifest/query provenance, not a graph node. V1 constructs graph nodes only from durable JSONL record families and never invents a synthetic snapshot node.
 
 Core edge kinds:
 
@@ -482,7 +500,7 @@ The lifecycle lens is:
 
 - current: accepted decisions, active selected claims, and maintained observations;
 - review: current material plus status-absent, proposed, deprecated, disputed, conflicting, incomplete, and stale material;
-- historical: lifecycle and effective-time state for a requested snapshot or time, including rejected and superseded records as records rather than current assertions.
+- historical: all lifecycle records captured by a requested immutable snapshot, including rejected and superseded records as records rather than current assertions. V1 does not expose an arbitrary effective-time `as_of` selector; time-point projection is deferred until its ranking and cursor semantics can be specified end to end.
 
 The provenance layer is:
 
@@ -500,13 +518,19 @@ The evidence graph above remains the source of truth. The ranker creates a deter
 2. A rejected or disputed claim never emits a semantic assertion edge. The review lens retains its reified claim, conflict, and review edges for diagnosis.
 3. The current candidate set contains only accepted decisions whose effective review status is verified or unreviewed. It emits active decision and constraint claims. Maintained observation claims also emit edges when extraction confidence is at least 0.50 or a human verified the claim.
 4. The review candidate set contains current candidates plus decisions whose source status is absent, proposed, or deprecated, and decisions whose effective review status is disputed. Non-rejected, non-disputed active claims may emit status-weighted edges; disputed and rejected claims remain diagnostic nodes only.
-5. The historical candidate set contains every decision record. For an as-of query, only selected claims whose applicability and effective interval were active at that point emit semantic edges. Rejected options, rationale, and consequences remain contextual nodes rather than assertions.
-6. For a claim with entity_ref subject and object, the projector emits a directed semantic edge from subject to object using the canonical predicate.
+5. The historical candidate set contains every decision record in the selected immutable snapshot. Non-rejected, non-disputed assertion claims may emit edges while preserving their effective-time interval as metadata. Rejected options, rationale, and consequences remain contextual nodes rather than assertions.
+6. For a positive claim with entity_ref subject and object, the projector emits a directed semantic edge from subject to object using the canonical predicate. A native positive `prohibits` relationship uses `prohibited_predicate: prohibits`. A negative must/should claim whose predicate is not already `prohibits` emits `PROHIBITS` and retains the original canonical predicate as `prohibited_predicate`; other negative claims remain reified without emitting the negated positive relationship.
 7. For a claim with a literal, unresolved, or implicit argument, it retains the reified claim but excludes that relationship from centrality.
 8. It connects each decision to the primary subject through GOVERNS, to concerns or drivers through ADDRESSES or JUSTIFIED_BY, to consequences through HAS_CONSEQUENCE, and to other affected entities through AFFECTS.
-9. It aggregates semantic edges only when from, type, to, normalized scope, and effective-time interval match. The aggregate retains every claim, evidence, and derivation ID.
+9. It aggregates semantic edges only when from, type, to, normalized scope, effective-time interval, and any edge-type discriminator such as `prohibited_predicate` match. The aggregate retains every claim, evidence, and derivation ID.
 
 Canonical predicate direction follows subject to object. The implementation does not add inverse edges. Each semantic edge stores scope, effective time, status factor, extraction confidence, independent source count, and provenance IDs.
+
+An independent source is a distinct source-content hash, not a path or source-version ID. Byte-identical copies can add mentions and evidence locations but never increase IDF document count, corroboration, evidence breadth, transition strength, decision-status authority, persistence, churn, or ranking features.
+
+When byte-identical paths share one explicit logical-source ID, relation candidates with the same normalized heading, canonical tuple, content hash, and source-relative evidence span are one claim occurrence. The claim builder collapses them before assigning tuple ordinals, preserves one claim identity, and unions their evidence, source-version, derivation, surface, and field-origin provenance. Path or candidate IDs never choose the ordinal.
+
+Authority is aggregated once per content-hash group. The group's effective authority is the least authoritative occurrence under the versioned authority order, and every status reducer and scoring feature uses that value rather than a path-level maximum. Independent byte groups may still contribute their own authority. This conservative rule ensures that copying narrative bytes into an accepted-ADR path cannot increase status precedence or any score; adding a lower-authority duplicate may lower confidence in the attribution, but never manufacture importance.
 
 The effective review status comes from the frozen review projection. Rejected records leave current and review semantic edges, disputed records enter the review lens as diagnostics only, verified records receive review assurance, and unreviewed deterministic records retain their extraction status.
 
@@ -551,7 +575,7 @@ Authority and commitment use:
 
 ~~~text
 authority_and_commitment =
-    0.60 × maximum_supporting_source_authority
+    0.60 × maximum_supporting_independent_content_group_authority
   + 0.40 × primary_claim_modality_weight
 ~~~
 
@@ -623,7 +647,7 @@ The initial edge base weights are:
 |---|---:|
 | CONSTRAINS, REQUIRES, PROHIBITS, SUPERSEDES | 1.00 |
 | GOVERNS | 1.00 |
-| DEPENDS_ON, CAUSES, TRADES_OFF_WITH, ADDRESSES, JUSTIFIED_BY | 0.90 |
+| DEPENDS_ON, CAUSES, TRADES_OFF_WITH, ADDRESSES, JUSTIFIED_BY, REPLACES | 0.90 |
 | CALLS, READS_FROM, WRITES_TO, PUBLISHES_TO, SUBSCRIBES_TO | 0.80 |
 | HAS_CONSEQUENCE | 0.80 |
 | OWNED_BY, DEPLOYED_ON, AFFECTS | 0.50 |
@@ -647,9 +671,9 @@ independent_evidence_breadth =
 
 Sources with the same content hash count once.
 
-Persistence starts at 0.50 in the first deterministic source revision and adds 0.10 for each prior consecutive deterministic snapshot in which decision_semantic_digest_v1 remained active and unchanged along the recorded decision lineage, capped at 1.00. Re-indexing unchanged source inputs creates an observation but not another deterministic source revision. Age alone does not imply importance. A changed semantic digest contributes to churn instead.
+Persistence starts at 0.50 in the first deterministic source revision and adds 0.10 for each prior consecutive source-revision group in which decision_semantic_digest_v1 remained active and unchanged along the recorded decision lineage, capped at 1.00. Adjacent deterministic snapshots with the same `source_revision_digest_v1` form one group; the newest snapshot is its analysis representative, but a rebuild inside the group inherits the previous representative's history features and creates no transition. Re-indexing unchanged source inputs creates an observation, while parser/configuration-only rebuilds create no architectural revision. Age alone does not imply importance. A semantic change across two distinct source-revision groups contributes to churn instead.
 
-decision_semantic_digest_v1 hashes decision status, supersession targets, and the sorted set of unique role-tagged semantic payloads from member claims: canonical argument type, key, and scope rather than record ID; canonical predicate; modality; polarity; normalized conditions and scope; effective time; claim role; and applicability. It excludes record and content IDs, duplicate corroborating claims, surface wording, source paths, evidence, confidence, derivations, field origins, human review state, graph metrics, ranks, and report text. Added corroborating evidence or a parser-confidence change therefore does not reset persistence; a changed commitment, boundary, qualifier, rationale, consequence, option, applicability, or lifecycle status does.
+decision_semantic_digest_v1 hashes decision status, status resolution, the distinct candidate status values, supersession targets, and the sorted set of unique role-tagged semantic payloads from member claims: canonical argument type, key, and scope rather than record ID; canonical predicate; modality; polarity; normalized conditions and scope; effective time; claim role; and applicability. It excludes candidate-status evidence/source IDs, record and content IDs, duplicate corroborating claims, surface wording, source paths, evidence, confidence, derivations, field origins, human review state, graph metrics, ranks, and report text. Added corroborating evidence or a parser-confidence change therefore does not reset persistence; a changed commitment, boundary, qualifier, rationale, consequence, option, applicability, lifecycle status, or status ambiguity does.
 
 Lexical salience is the mean across primary claims of 0.40 times normalized subject TF-IDF, 0.20 times predicate TF-IDF, and 0.40 times object TF-IDF. Its five-percent criticality weight prevents unusual vocabulary from dominating accepted cross-cutting decisions.
 
@@ -674,7 +698,7 @@ Contradiction increases review priority. It does not convert a disputed claim in
 V1 calculates the review features as follows:
 
 - conflict is 1.00 when claims share canonical subject and predicate, have overlapping scope and effective time, and contain incompatible polarity, object, or active status; otherwise it is zero;
-- churn is min(1, semantic decision changes across the last three deterministic snapshot transitions / 3);
+- churn is min(1, semantic decision changes across the last three distinct source-revision-group transitions / 3);
 - missing_rationale is 1.00 when both driver and consequence paths are missing, 0.50 when one is missing, and zero when both exist;
 - stale_or_ambiguous_status is 1.00 for conflicting active statuses, 0.75 for absent status, 0.50 for proposed, 0.25 for deprecated, and zero for accepted;
 - scope_ambiguity is 1.00 when the source contains a scope marker that extraction could not resolve, 0.50 when a prescriptive claim has no scope and its subject occurs in multiple known scopes, and zero otherwise;
@@ -765,6 +789,8 @@ Default durable memory layout:
   snapshots/
     <content-digest>/
       manifest.json
+      sources.jsonl
+      segments.jsonl
       terms.jsonl
       entities.jsonl
       claims.jsonl
@@ -791,24 +817,29 @@ Each manifest identifies:
 - parent_snapshot_id for an enriched or reviewed snapshot;
 - base_deterministic_snapshot_id for enriched and reviewed snapshots;
 - material_input_digest;
+- source_revision_digest inherited by layered snapshots;
 - deterministic_pipeline_digest inherited by every snapshot, plus enrichment_pipeline_digest or review_pipeline_digest when those stages ran;
+- the canonical fingerprint preimage for every non-null pipeline digest;
+- review_authority_policy_digest for reviewed snapshots;
 - input_digest;
 - content_digest;
 - frozen review-set digest;
 - LLM configuration and prompt digests when enrichment ran.
 
-deterministic_pipeline_digest covers every deterministic implementation artifact that can change canonical output: schema versions, structural segmenters, parser and model artifacts, extraction rules, qualifier rules, normalizers and ontology, decision reducer, canonical serializer, graph projector and algorithms, score configuration, and report templates. enrichment_pipeline_digest covers proposal schemas, bounded-prompt assembly, response validation, and materialization code. review_pipeline_digest covers review schemas, authority reduction, proposal acceptance, successor materialization, and reviewed-report templates. Each digest also records the Python runtime and installed versions of output-affecting dependencies. A packaged release hashes its installed package artifact and stage manifest; a development checkout hashes the selected implementation files, so an uncommitted rule or template change cannot reuse an older snapshot.
+deterministic_pipeline_digest covers every deterministic implementation artifact that can change canonical output: schema versions, structural segmenters, parser and model artifacts, extraction rules, qualifier rules, normalizers and ontology, decision reducer, canonical serializer, graph projector and algorithms, score configuration, and report templates. enrichment_pipeline_digest covers proposal schemas, bounded-prompt assembly, response validation, and materialization code. review_pipeline_digest covers review schemas, authority reduction, proposal acceptance, successor materialization, and reviewed-report templates. Each canonical fingerprint preimage also records the Python runtime and installed versions of output-affecting dependencies and is persisted in the manifest; publication and reuse verify that its hash equals the corresponding digest. A packaged release hashes its installed package artifact and stage manifest; a development checkout hashes the selected implementation files, so an uncommitted rule or template change cannot reuse an older snapshot.
 
-For deterministic indexing, material_input_digest hashes selected relative source paths, source content hashes, source-role metadata, deterministic_pipeline_digest, ontology, scoring configuration, and deterministic configuration. Before building, the indexer compares this value with the current base deterministic snapshot:
+A reviewed build may rerun deterministic reducers, diagnostics, graph projection, ranking, and report generation. Before doing so, the finalizer computes the current deterministic pipeline fingerprint with the parent's recorded runtime/model configuration and requires it to equal the parent's `deterministic_pipeline_digest`. A mismatch fails closed and asks for a new deterministic base; reviewed output is never labeled with an inherited digest for different code. The review fingerprint also hashes the inherited deterministic digest and every review-specific schema, reducer, materializer, orchestrator, reviewed-report template, runtime, and output-affecting dependency.
+
+For deterministic indexing, material_input_digest hashes selected relative source paths, source content hashes, source-role metadata, deterministic_pipeline_digest, ontology, scoring configuration, and deterministic configuration. A separate `source_revision_digest_v1` identifies architecture-document revisions for history by hashing only the sorted set of unique selected `source.content_hash` values. Paths, multiplicity, source kind/role/authority, parser, model, ontology, scoring, aliases, report code, runtime, and all other configuration are excluded. Adding or moving a byte-identical copy therefore never advances history, including when the copy has different path-derived authority; adding, removing, or changing a unique byte group does. Metadata and pipeline changes may still require a deterministic rebuild through `material_input_digest`, but adjacent rebuilds with the same source-revision key collapse to one history position. Before building, the indexer compares material input with the current base deterministic snapshot:
 
 - when the value is unchanged, it reuses that snapshot and records a new observation;
 - when the value changed, it creates a snapshot whose analysis_parent_snapshot_id is the current base deterministic snapshot, or null at genesis.
 
 If current.json selects an enriched or reviewed snapshot derived from the unchanged base, indexing preserves that selected layer and points the new observation to it. A material deterministic change selects the new deterministic snapshot; proposals and reviews against the prior base remain in history and must be re-evaluated against new target content digests.
 
-The deterministic input_digest hashes material_input_digest and analysis_parent_snapshot_id. This makes history-dependent persistence and churn reproducible without treating repeated observation of unchanged inputs as another source revision. An enriched input_digest hashes its base deterministic snapshot, parent snapshot, enrichment pipeline digest, LLM configuration, prompt, provider, and model identity. A reviewed input_digest hashes its parent snapshot, base deterministic snapshot, review pipeline digest, frozen review set, and review-authority configuration.
+The deterministic input_digest hashes exactly material_input_digest, source_revision_digest, analysis_parent_snapshot_id, and the canonical Git rename-resolution input used to assign fallback logical-source identities and ambiguous-rename warnings. Rename resolution affects snapshot content but not freshness: once a material build records a completed rename, unchanged material reuses that snapshot instead of rebuilding with a newly empty Git diff. The analysis-parent chain may contain deterministic rebuilds for pipeline/configuration changes; history collapses adjacent entries with the same source-revision digest. If the current build has the same source-revision digest as its parent, matched decisions inherit the parent's persistence and churn exactly rather than resetting or advancing them because extraction changed. An enriched input_digest hashes its base deterministic snapshot, parent snapshot, enrichment pipeline digest, LLM configuration, prompt, provider, and model identity. A reviewed input_digest hashes its parent snapshot, base deterministic snapshot, review pipeline digest, frozen review set, and review-authority configuration.
 
-observations.jsonl stores observation ID, selected snapshot ID, previous current snapshot ID, base deterministic snapshot ID, branch, commit, dirty-worktree fingerprint, material input digest, and observation time. It lives outside immutable snapshots and is excluded from their content digest. An unrelated commit that leaves every selected architecture input unchanged therefore reuses the same deterministic snapshot while gaining a new observation record.
+observations.jsonl stores observation ID, selected snapshot ID, previous current snapshot ID, base deterministic snapshot ID, branch, commit, dirty-worktree fingerprint, material input digest, source revision digest, and observation time. It lives outside immutable snapshots and is excluded from their content digest. An unrelated commit that leaves every selected architecture input unchanged therefore reuses the same deterministic snapshot while gaining a new observation record.
 
 The content digest hashes:
 
@@ -839,13 +870,14 @@ JSON Lines supports record-at-a-time processing and Unix-style pipelines.
 
 PROJECT.json, current.json, and manifest.json remain small standard JSON documents. current.json contains the selected snapshot identifier, latest observation identifier, and publication metadata.
 
-Human review files remain outside generated snapshots. A reviewed-snapshot finalization freezes the complete validated review ledger into reviews.jsonl and separately computes which records apply. Deterministic and enriched snapshots contain canonical empty review files. A report in a reviewed snapshot records the digest of that frozen review set.
+Human review files remain outside generated snapshots. A reviewed-snapshot finalization freezes the complete validated review ledger into reviews.jsonl and separately computes which records apply. Deterministic and enriched snapshots contain canonical empty review files. The reviewed manifest records the digest of that frozen review set; report.md remains content-only and does not repeat snapshot identity metadata.
 
 ### Initial Python toolset
 
 The implementation keeps the dependency boundary small and records the installed version and relevant model artifact digest for each generated record:
 
 - jsonlines reads and writes record-oriented durable state;
+- PyYAML safely parses the supported YAML configuration and source documents;
 - spaCy supplies English tokenization, noun chunks, and dependency parses;
 - scikit-learn supplies sparse TF-IDF vectors and cosine similarity;
 - NetworkX supplies the versioned PageRank, degree, and betweenness implementations;
@@ -869,7 +901,7 @@ SnapshotFinalizer.publish()
 AtomicJsonlLedger.append(path, record)
 ~~~
 
-The implementation uses the small jsonlines package for standards-compliant reading, writing, validation errors, and deterministic key ordering. The Python standard library handles small manifest files. The ijson package remains an adapter dependency only if a future source format requires streaming a large nested JSON document.
+The implementation uses the small jsonlines package for record framing and streaming reads/writes; the canonical serializer supplies validation and deterministic key ordering. The Python standard library handles small manifest files. The ijson package remains an adapter dependency only if a future source format requires streaming a large nested JSON document.
 
 Writers target a temporary staging directory. Finalization:
 
@@ -880,7 +912,7 @@ Writers target a temporary staging directory. Finalization:
 5. sorts records by stable ID;
 6. acquires the project publication lock;
 7. compares the expected parent against current.json;
-8. for a reviewed snapshot, reads one immutable byte image of the complete review ledger and freezes every valid review plus its digest into staging;
+8. for a reviewed snapshot, reads one locked byte image of the complete review ledger, validates it, sorts its records by stable ID, and freezes those exact canonical JSONL bytes plus their digest into staging;
 9. renders report.md from frozen, content-derived inputs;
 10. calculates the payload file-digest table;
 11. assembles the manifest core and calculates the snapshot content digest;
@@ -895,11 +927,11 @@ Finalized snapshots are immutable. Indexing, LLM enrichment, and changed human r
 
 If a content-digest directory already exists, the publisher compares its manifest file-digest table with staging. An identical bundle is reused. Any byte mismatch under the same digest is a fatal integrity error. A project-scoped operating-system file lock prevents concurrent writers from publishing, appending a review or observation, or changing current.json at the same time.
 
-The two append-only ledgers are append-only at the record level, not by unsafe raw file append. AtomicJsonlLedger validates the existing file, writes its canonical records plus the new record to a sibling temporary file, synchronizes the file, atomically replaces the old path, and synchronizes the parent directory while holding the project lock. A crash therefore exposes either the old complete ledger or the new complete ledger, never a partial final JSON line. Snapshot freezing parses exactly the locked byte image it hashed. Manual edits with invalid framing or authority values fail validation rather than being partially applied.
+The two append-only ledgers are append-only at the record level, not by unsafe raw file append. AtomicJsonlLedger validates the existing file, writes its canonical records plus the new record to a sibling temporary file, synchronizes the file, atomically replaces the old path, and synchronizes the parent directory while holding the project lock. A crash therefore exposes either the old complete ledger or the new complete ledger, never a partial final JSON line. Snapshot freezing parses exactly one locked byte image, rejects invalid framing or authority values, then stable-ID-sorts the validated records with the shared canonical JSONL writer. `frozen_review_set_digest` hashes those exact canonical snapshot bytes, not the external ledger's append order. The raw-image digest is transient consistency evidence only and is not snapshot identity.
 
 ## Human Review Records
 
-reviews/reviews.jsonl is an append-only human-owned ledger. A review can target a claim, decision, proposal, entity alias, qualifier, derivation, or report item.
+reviews/reviews.jsonl is an append-only human-owned ledger. V1 reviews target durable claims, decisions, proposals, entities, terms, derivations, rankings, or decision-diagnostic warnings. A qualifier correction may target an allowlisted claim field. Alias and report feedback targets the underlying entity, decision, ranking, or diagnostic record for verification/dispute/rejection or a diagnostic proposal; V1 does not materialize alias or report-text corrections, and report prose has no separate review identity.
 
 Each review stores:
 
@@ -919,11 +951,17 @@ supersedes_review_id
 created_at
 ~~~
 
-verdict is verify, dispute, reject, accept_proposal, reject_proposal, or correct. reviewer_authority is resolved from the project authority policy for reviewer_id, copied into the record by the review command, and validated against authority_policy_digest; it is not a free-form assertion by the reviewer. reject requires a whole-record target, correct requires field_path and replacement_value, and proposal verdicts require a proposal target. A review becomes stale when target_content_digest no longer matches the target record version. The report shows stale reviews but does not apply them.
+verdict is verify, dispute, reject, accept_proposal, reject_proposal, or correct. reviewer_authority is resolved from the project authority policy for reviewer_id, copied into the record by the review command, and validated against authority_policy_digest; it is not a free-form assertion by the reviewer. reject requires a whole-record target; correct requires an exact `correctable_fields_v1` claim/entity path and replacement value; and proposal verdicts require a proposal target. A review becomes stale when target_content_digest no longer matches the target record version. The report shows stale reviews but does not apply them.
+
+Review append is a locked transaction, not an unchecked line append. While holding the project lock, it resolves the exact target and every supplied evidence ID against the selected immutable snapshot and requires the latter to be evidence records. It validates the complete existing homogeneous review ledger, then preflights any supersedes link: the ancestor must exist, have the same reviewer, name the same target kind/stable ID and field path, and leave the supersession graph acyclic. Only then does the crash-safe ledger replacement occur. A missing or wrong-kind evidence reference, missing/cross-reviewer/incompatible supersession, cycle, or malformed existing ledger leaves the original bytes unchanged.
 
 For several active reviews, the projection uses the highest validated reviewer authority. Equal-authority incompatible verdicts produce disputed status. A later review from the same reviewer affects the projection only when it explicitly supersedes that reviewer's earlier record. The frozen snapshot contains the complete review ledger, including superseded ancestors, so every supersedes_review_id resolves inside reviews.jsonl.
 
 Review status is a materialized projection field. Base claims and decisions do not mutate when a reviewer acts. Accepted corrections and proposals create successor record versions in a reviewed snapshot with field-level origin and review IDs.
+
+A later reviewed snapshot may use the selected reviewed snapshot as its parent. It preserves previously materialized successors once, freezes the complete append-only ledger, and applies new events only to exact record versions in that parent. Reviews against displaced predecessor digests are stale; follow-up review targets the current successor digest. The chain retains one immutable base deterministic snapshot and never counts review rounds as source revisions.
+
+Finalizing a selected reviewed snapshot again with the same frozen ledger, authority-policy digest, proposal payload, inherited deterministic digest, review-pipeline digest, and already-materialized review set reuses that snapshot. The finalizer first verifies the current deterministic fingerprint against the base, before reading the review ledger or considering reuse, so code drift cannot hide behind a no-op path. A reuse result returns the existing snapshot ID with `observation_id: null`; it does not create a no-op reviewed child, observation, or current-pointer write. Only a changed review input or pipeline can create the next reviewed snapshot.
 
 The frozen projection first reduces non-stale reviews for each target. At the highest reviewer-authority level, a whole-record verify yields verified, a whole-record reject yields rejected, and a whole-record dispute or incompatible verdicts yield disputed. A field-level verify does not verify the whole record; a field-level dispute makes the record disputed until corrected. An accepted correction or proposal is not represented as verified content: it materializes a successor record, and reviews then target that successor digest.
 
@@ -946,27 +984,19 @@ The public CLI follows the sibling's status-first workflow:
 architecture-graph memory status .
 architecture-graph index .
 architecture-graph report .
-architecture-graph get claim <id>
-architecture-graph find claims --subject checkout --limit 20
-architecture-graph decisions --lens criticality --limit 10
-architecture-graph neighbors <entity-id> --depth 2 --limit 30
-architecture-graph evidence <decision-id>
-architecture-graph explain <decision-id>
-architecture-graph context "payment dependencies" --max-chars 12000
-architecture-graph diff <snapshot-a> <snapshot-b>
-architecture-graph enrich . --llm
+architecture-graph get claims <id> --root .
+architecture-graph find claims --root . --contains checkout --limit 20
+architecture-graph decisions . --score criticality --limit 10
+architecture-graph neighbors . <entity-id> --depth 2 --limit 30
+architecture-graph evidence . <decision-id>
+architecture-graph explain . <decision-id>
+architecture-graph context . "payment dependencies" --max-chars 12000
+architecture-graph diff . <snapshot-a> <snapshot-b>
 ~~~
 
 Commands stream the relevant JSONL files and build temporary in-memory maps only for the requested operation.
 
-Every read command supports:
-
-- record limits;
-- selected fields;
-- maximum traversal depth;
-- maximum evidence excerpts;
-- maximum characters;
-- Markdown or JSON output.
+Every read command supports selected fields, a maximum-character budget, and Markdown or JSON output. Multi-record commands add record limits and cursors; graph-traversal commands add a maximum depth; evidence-bearing commands add a maximum excerpt count. Unsupported bounds are not accepted as decorative no-op flags.
 
 Default agent-facing limits are:
 
@@ -977,16 +1007,16 @@ Default agent-facing limits are:
 | Evidence excerpts per item | 3 |
 | Characters | 12,000 |
 
-All read commands apply limits after selecting a stable command-specific order:
+All read commands apply their applicable limits after selecting a stable command-specific order:
 
-- get resolves one exact ID. If the selected fields cannot fit, it returns a schema-valid summary with omitted_fields and directs the caller to request narrower fields or use export;
+- get resolves one exact ID. If the selected fields cannot fit, it returns a schema-valid summary with omitted_fields and directs the caller to request narrower fields;
 - find sorts scored matches by descending score and stable ID, or unscored filtered matches by stable ID;
 - neighbors uses breadth-first depth, then descending edge weight, edge type, source ID, and target ID;
 - evidence uses descending source authority, then relative path, source span, and evidence ID;
 - explain renders summary, score features, graph reasons, evidence, and architect question in that fixed priority;
 - decisions and report use their stored lens rank followed by stable decision ID.
 
-Each command constructs complete result-item envelopes. It first removes optional evidence excerpts and verbose explanations, then removes the lowest-priority complete item until the result fits; it never slices serialized JSON. Multi-item commands return truncated, omitted_count, and a cursor that binds snapshot ID, command, normalized arguments and filters, configuration digest, and last emitted sort tuple. Markdown follows the same item boundary. export is the only command allowed to stream an unbounded canonical artifact.
+Each command constructs complete result-item envelopes. It first removes optional evidence excerpts and verbose explanations, then removes the lowest-priority complete item until the result fits; it never slices serialized JSON. Multi-item commands return truncated, omitted_count, and a cursor that binds snapshot ID, command, normalized arguments and filters, configuration digest, and last emitted sort tuple. Markdown follows the same item boundary. V1 has no unbounded export command: callers request narrower fields or continue through bound cursors. A full canonical export may be added after V1 as an explicit machine-to-machine interface.
 
 At index time, each decision receives a deterministic search document formed from its normalized title, sorted identifiers and aliases, canonical and surface subject-predicate-object terms from primary and constraint claims, and linked concern or driver labels. Full evidence prose is not placed in that TF-IDF document. The bounded evidence set used for query overlap contains at most three primary-or-constraint evidence spans per decision, sorted by source authority, relative path, span, and evidence ID, with each excerpt clipped to 400 characters at a sentence or source-line boundary.
 
@@ -996,8 +1026,8 @@ The context command uses a deterministic selection algorithm:
 2. It scores decisions eligible for the selected lifecycle lens as 0.55 times TF-IDF cosine similarity, 0.25 times identifier and alias match, 0.10 times the selected lens score, and 0.10 times evidence-term overlap. TF-IDF cosine uses the stored snapshot vocabulary and decision search document. Identifier and alias match is 1.00 for an exact normalized match, 0.70 for a token-boundary prefix match, and zero otherwise. Evidence-term overlap is the fraction of distinct normalized query tokens found in the bounded evidence set. The lens feature is the decision's normalized criticality, review-priority, or confidence score.
 3. It sorts by descending seed score and stable ID, then selects at most eight seeds.
 4. It traverses only semantic ranking edges allowed by the lens. Current uses decision edges GOVERNS, ADDRESSES, HAS_CONSEQUENCE, and AFFECTS plus semantic predicates constrains, requires, prohibits, depends_on, calls, reads_from, writes_to, publishes_to, and subscribes_to. Review also allows CONTRADICTS, SUPERSEDES, SUPPORTS, and proposal links.
-5. Traversal priority is seed score times semantic edge weight times 0.5 to the traversal depth. A visited node-and-depth set prevents cycles.
-6. It sorts final candidates by traversal score, lens score, and stable ID.
+5. Traversal priority is seed score times semantic edge weight times 0.5 to the traversal depth. Each queued path carries path-local visited node and edge sets and cannot revisit either; the reducer retains only the highest-value path per internal node.
+6. It deduplicates final decisions to their best path and sorts them by traversal score, lens score, and stable ID.
 
 The output budget counts Unicode scalar values after rendering. It reserves 10 percent for query and truncation metadata, 55 percent for decision summaries and score explanations, 30 percent for evidence, and 5 percent for omission metadata. Evidence clips at sentence or source-line boundaries. If one record exceeds its allocation, the command emits its ID and bounded summary without the full excerpt.
 
@@ -1011,7 +1041,7 @@ The context command selects terms and decisions, traverses bounded typed edges, 
 - short evidence excerpts;
 - unresolved architect questions.
 
-It never emits a complete snapshot. An explicit export command handles full machine-to-machine transfer.
+It never emits a complete snapshot. Full machine-to-machine export is post-V1; current callers page through bounded canonical results.
 
 JMESPath may filter an already bounded JSON result. The CLI does not run an unrestricted in-memory JMESPath query over the entire corpus. jq remains an optional shell tool, including its streaming mode, and is not a runtime requirement.
 
@@ -1044,9 +1074,12 @@ Source-version identity and logical-source identity remain separate:
 
 - source_version_id hashes relative path and content hash;
 - logical_source_id uses an explicit ADR or document identifier when present;
-- otherwise PROJECT.json stores the first relative path as the logical source key;
-- Git rename detection with the configured 60-percent similarity threshold moves that logical key when the match is unique;
+- repeated occurrences of one explicit identifier share that logical ID only when their content hashes match; the same identifier on different bytes fails before publication;
+- otherwise genesis hashes project identity, prior snapshot/genesis marker, relative path, and content hash, while each immutable source record carries the resulting logical ID;
+- the next index resolves the selected layer to its base deterministic analysis parent, reads path-to-logical-ID state only from that immutable parent, uses Git to identify added/deleted candidates, compares every eligible pair with the versioned exact 60-percent line-sequence threshold, and moves a logical ID only for a unique non-competing best match;
 - ambiguous rename matches create removal and addition plus a warning.
+
+`PROJECT.json` stores only immutable project identity/root metadata. It is never an append-only path history, so an orphaned failed publication cannot poison later logical-source resolution and a path reused after a rename receives a new logical ID.
 
 Decision-anchor lineage matches in this order:
 
@@ -1057,9 +1090,9 @@ Decision-anchor lineage matches in this order:
 
 If the best match is tied, V1 records removal and addition rather than guessing.
 
-lineage.jsonl records predecessor and successor identity keys for source renames, moved anchors, changed decision clusters, and accepted entity merges or splits. Evidence version IDs may change after an edit while claim and decision lineage remains stable.
+lineage.jsonl records predecessor and successor identity keys for source renames, moved anchors, changed decision clusters, and accepted identity-field corrections. A future versioned entity merge/split cascade uses the same ledger. Evidence version IDs may change after an edit while claim and decision lineage remains stable.
 
-Persistence and churn follow deterministic snapshots only. An enriched or reviewed snapshot points to base_deterministic_snapshot_id and inherits its position in that lineage rather than counting as another source revision.
+Persistence and churn follow byte-deduplicated deterministic source-revision groups only. Consecutive deterministic rebuilds with the same source-revision digest collapse to one position, and adding only another path for already selected bytes creates no position. An enriched or reviewed snapshot points to base_deterministic_snapshot_id and inherits its position in that lineage rather than counting as another source revision.
 
 Snapshot diff reports:
 
@@ -1173,7 +1206,7 @@ Fixtures include:
 - one decision with different environment scopes;
 - old superseded ADRs;
 - contradictory current documents;
-- duplicated source text;
+- duplicated source text copied under a different path and higher authority;
 - diagram-only relationships;
 - missing rationale;
 - LLM proposals that conflict with deterministic claims.
@@ -1187,6 +1220,7 @@ Tests cover:
 - extractor and scoring configuration changes;
 - implementation, schema, report-template, and dependency changes covered by pipeline digests;
 - unchanged-input snapshot reuse with a new observation;
+- source-revision grouping across pipeline/configuration rebuilds and duplicate paths;
 - a changed-then-reverted corpus with explicit analysis-parent lineage;
 - interrupted finalization;
 - immutable published snapshots;
@@ -1194,7 +1228,8 @@ Tests cover:
 - orphan observation detection after an interrupted pointer update;
 - crash safety during review and observation ledger replacement;
 - stale review exclusion and frozen reviewed snapshots;
-- accepted proposal successor records;
+- locked rejection of dangling evidence/supersession review appends and no-op reviewed-finalize reuse;
+- accepted V1 replace-field proposal successor records;
 - reuse of unchanged extraction records;
 - corpus-wide TF-IDF, resolution, conflict, graph, rank, and report recomputation after a local edit.
 
@@ -1312,6 +1347,7 @@ The first deterministic release is complete when:
 - W3C, [PROV-O: The PROV Ontology](https://www.w3.org/TR/prov-o/).
 - [JSON Lines format](https://jsonlines.org/).
 - jsonlines, [Python documentation](https://jsonlines.readthedocs.io/en/latest/).
+- PyYAML, [project page](https://pypi.org/project/PyYAML/).
 - ijson, [Iterative JSON parser](https://pypi.org/project/ijson/).
 - JMESPath, [Specification](https://jmespath.org/specification.html).
 - jq, [Streaming manual](https://jqlang.org/manual/dev/).
