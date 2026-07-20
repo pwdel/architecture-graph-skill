@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -27,4 +28,17 @@ def architecture_repo(tmp_path: Path) -> Path:
     git(repo, "config", "user.name", "Fixture")
     git(repo, "add", "docs/adr/ADR-001.md", "README.md")
     git(repo, "commit", "-m", "fixture")
+    return repo
+
+
+@pytest.fixture
+def phase1_repository(tmp_path: Path) -> Path:
+    fixture = Path(__file__).parent / "fixtures" / "phase1_repo"
+    repo = tmp_path / "phase1-repo"
+    shutil.copytree(fixture, repo)
+    git(repo, "init", "-b", "main")
+    git(repo, "config", "user.email", "fixture@example.com")
+    git(repo, "config", "user.name", "Fixture")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "phase1 fixture")
     return repo

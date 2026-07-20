@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -627,23 +628,48 @@ def _verify_collision(target: Path, manifest: Mapping[str, JSONValue]) -> None:
         raise ValueError(f"snapshot digest collision at {target}")
 
 
+def _validated_observation(
+    observation: Mapping[str, JSONValue],
+) -> dict[str, JSONValue]:
+    allowed = {"branch", "commit", "dirty_fingerprint", "observed_at"}
+    if set(observation) != allowed:
+        raise ValueError("observation fields are invalid")
+    branch = observation["branch"]
+    if branch is not None and (not isinstance(branch, str) or not branch):
+        raise ValueError("observation branch must be a nonempty string or null")
+    commit = observation["commit"]
+    if commit is not None and (
+        not isinstance(commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit) is None
+    ):
+        raise ValueError(
+            "observation commit must be null or a lowercase SHA-1/SHA-256 object ID"
+        )
+    dirty = observation["dirty_fingerprint"]
+    if not isinstance(dirty, str) or DIGEST.fullmatch(dirty) is None:
+        raise ValueError("observation dirty_fingerprint is invalid")
+    observed_at = observation["observed_at"]
+    if not isinstance(observed_at, str) or not observed_at.endswith("Z"):
+        raise ValueError("observation observed_at must be canonical UTC")
+    try:
+        parsed = datetime.fromisoformat(observed_at[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError("observation observed_at must be canonical UTC") from error
+    canonical = parsed.astimezone(timezone.utc).isoformat(
+        timespec="microseconds" if parsed.microsecond else "seconds"
+    ).replace("+00:00", "Z")
+    if canonical != observed_at:
+        raise ValueError("observation observed_at must be canonical UTC")
+    return dict(observation)
+
+
 def publish_snapshot(
     project: ProjectPaths,
     bundle: SnapshotBundle,
     observation: Mapping[str, JSONValue],
     expected_current_snapshot_id: str | None,
 ) -> PublishedSnapshot:
-    allowed_observation_keys = {"branch", "commit", "dirty_fingerprint", "observed_at"}
-    unknown_observation_keys = sorted(set(observation) - allowed_observation_keys)
-    if unknown_observation_keys:
-        raise ValueError(
-            f"unknown observation keys: {', '.join(unknown_observation_keys)}"
-        )
-    missing_observation_keys = sorted(allowed_observation_keys - observation.keys())
-    if missing_observation_keys:
-        raise ValueError(
-            f"missing observation keys: {', '.join(missing_observation_keys)}"
-        )
+    observation = _validated_observation(observation)
     staging, manifest = _write_stage(project, bundle)
     content_digest = str(manifest["content_digest"])
     digest_hex = content_digest.removeprefix("sha256:")
@@ -724,9 +750,7 @@ def observe_existing_snapshot(
     observation: Mapping[str, JSONValue],
     expected_current_snapshot_id: str,
 ) -> PublishedSnapshot:
-    allowed = {"branch", "commit", "dirty_fingerprint", "observed_at"}
-    if set(observation) != allowed:
-        raise ValueError("existing-snapshot observation fields are invalid")
+    observation = _validated_observation(observation)
     with ProjectLock(project.lock_path):
         current = _current(project)
         actual = None if current is None else str(current["snapshot_id"])

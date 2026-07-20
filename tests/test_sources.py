@@ -8,9 +8,19 @@ from architecture_graph.canonical import (
     sha256_digest,
     source_revision_digest,
 )
-from architecture_graph.config import configuration_digest, load_config
+from architecture_graph.config import (
+    ConfigurationPathError,
+    ProjectConfig,
+    configuration_digest,
+    load_config,
+)
 from architecture_graph.fingerprint import pipeline_fingerprint
-from architecture_graph.project import ProjectPaths, normalize_remote
+from architecture_graph.project import (
+    ProjectPaths,
+    RepositoryStateError,
+    capture_git_observation,
+    normalize_remote,
+)
 from architecture_graph.sources import discover_sources, material_input_digest
 
 
@@ -287,3 +297,156 @@ def test_remote_normalization_removes_transport_spelling_noise() -> None:
     assert normalize_remote("git@GitHub.com:Org/Repo.git") == normalize_remote(
         "ssh://git@github.com/Org/Repo/"
     )
+
+
+def test_explicit_config_path_is_root_relative(architecture_repo: Path) -> None:
+    nested = architecture_repo / "config" / "custom.yaml"
+    nested.parent.mkdir()
+    nested.write_text("schema_version: 1\n")
+    assert load_config(architecture_repo, Path("config/custom.yaml")) == ProjectConfig()
+
+
+def test_missing_explicit_config_does_not_fall_back(architecture_repo: Path) -> None:
+    with pytest.raises(ConfigurationPathError, match="configuration file not found"):
+        load_config(architecture_repo, Path("missing.yaml"))
+
+
+def test_dirty_fingerprint_changes_for_repeated_same_path_edits(
+    architecture_repo: Path,
+) -> None:
+    tracked = architecture_repo / "docs" / "adr" / "ADR-001.md"
+    tracked.write_text("first dirty value\n")
+    first = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    tracked.write_text("second dirty value\n")
+    second = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    assert second != first
+
+
+def test_dirty_fingerprint_tracks_repeated_staged_bytes_independently(
+    architecture_repo: Path,
+) -> None:
+    from conftest import git
+
+    tracked = architecture_repo / "docs" / "adr" / "ADR-001.md"
+    relative = "docs/adr/ADR-001.md"
+    tracked.write_text("first staged value\n")
+    git(architecture_repo, "add", relative)
+    tracked.write_text("fixed worktree value\n")
+    assert git(architecture_repo, "status", "--short", relative).startswith("MM ")
+    first = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+
+    tracked.write_text("second staged value\n")
+    git(architecture_repo, "add", relative)
+    tracked.write_text("fixed worktree value\n")
+    assert git(architecture_repo, "status", "--short", relative).startswith("MM ")
+    second = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    assert second != first
+
+
+def test_dirty_fingerprint_changes_for_repeated_untracked_edits(
+    architecture_repo: Path,
+) -> None:
+    untracked = architecture_repo / "same-path.md"
+    untracked.write_text("first\n")
+    first = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    untracked.write_text("second\n")
+    second = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    assert second != first
+
+
+def test_dirty_fingerprint_hashes_symlink_bytes_not_target_bytes(
+    architecture_repo: Path,
+) -> None:
+    link = architecture_repo / "untracked-link"
+    link.symlink_to("first-target")
+    first = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    link.unlink()
+    link.symlink_to("second-target")
+    second = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    assert second != first
+
+
+def test_dirty_fingerprint_distinguishes_regular_file_from_same_byte_symlink(
+    architecture_repo: Path,
+) -> None:
+    path = architecture_repo / "same-kind-path"
+    path.write_bytes(b"same-target")
+    path.chmod(0o777)
+    regular = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    path.unlink()
+    path.symlink_to("same-target")
+    symlink = capture_git_observation(architecture_repo)["dirty_fingerprint"]
+    assert symlink != regular
+
+
+def test_dirty_path_digest_rejects_unsupported_file_type(tmp_path: Path) -> None:
+    from architecture_graph.project import _path_digest
+
+    with pytest.raises(RepositoryStateError, match="unsupported dirty path type"):
+        _path_digest(tmp_path)
+
+
+def test_malformed_git_status_path_fails_as_repository_state(
+    architecture_repo: Path, monkeypatch
+) -> None:
+    from architecture_graph.project import _dirty_preimage_once
+
+    monkeypatch.setattr(
+        "architecture_graph.project._git_bytes_checked",
+        lambda *args, **kwargs: b"? \xff\0",
+    )
+    with pytest.raises(RepositoryStateError, match="non-UTF-8 path"):
+        _dirty_preimage_once(architecture_repo)
+
+
+def test_project_id_rejects_non_utf8_remote_as_repository_state(
+    architecture_repo: Path, monkeypatch
+) -> None:
+    from architecture_graph.project import project_id
+
+    monkeypatch.setattr(
+        "architecture_graph.project.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout=b"\xff", stderr=b""
+        ),
+    )
+    with pytest.raises(RepositoryStateError, match="non-UTF-8 identity output"):
+        project_id(architecture_repo)
+
+
+@pytest.mark.parametrize("failure", ["executable", "git"])
+def test_project_id_maps_git_failures_to_repository_state(
+    architecture_repo: Path, monkeypatch, failure: str
+) -> None:
+    from architecture_graph.project import project_id
+
+    def fail(*args, **kwargs):
+        if failure == "executable":
+            raise PermissionError("cannot execute Git")
+        return subprocess.CompletedProcess(args[0], 2, stdout=b"", stderr=b"failed")
+
+    monkeypatch.setattr("architecture_graph.project.subprocess.run", fail)
+    with pytest.raises(RepositoryStateError, match="Git .*failed|could not run"):
+        project_id(architecture_repo)
+
+
+def test_git_observation_rejects_head_change_during_dirty_capture(
+    architecture_repo: Path, monkeypatch
+) -> None:
+    from conftest import git
+    from architecture_graph import project as project_module
+
+    real_capture = project_module._stable_dirty_preimage
+
+    def advance_head(root: Path):
+        readme = root / "README.md"
+        readme.write_text(readme.read_text() + "concurrent commit\n")
+        git(root, "add", "README.md")
+        git(root, "commit", "-m", "advance head during observation")
+        return real_capture(root)
+
+    monkeypatch.setattr(
+        "architecture_graph.project._stable_dirty_preimage", advance_head
+    )
+    with pytest.raises(RepositoryStateError, match="HEAD changed"):
+        capture_git_observation(architecture_repo)

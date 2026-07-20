@@ -48,6 +48,10 @@ AUTHORITY_CLASSES = frozenset(
 )
 
 
+class ConfigurationPathError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     schema_version: int = 1
@@ -163,11 +167,40 @@ def configuration_digest(config: ProjectConfig) -> str:
     return sha256_digest(canonical_bytes(config.as_digest_input()))
 
 
-def load_config(root: Path, config_path: Path | None = None) -> ProjectConfig:
-    path = config_path or root / ".architecture-graph.yaml"
+def resolve_config_path(
+    root: Path, config_path: Path | None
+) -> tuple[Path, bool]:
+    repository = root.resolve()
+    if config_path is None:
+        return repository / ".architecture-graph.yaml", False
+    selected = config_path if config_path.is_absolute() else repository / config_path
+    return selected.resolve(), True
+
+
+def _configuration_text(path: Path, *, explicit: bool) -> str | None:
     if not path.exists():
+        if explicit:
+            raise ConfigurationPathError(f"configuration file not found: {path}")
+        return None
+    if not path.is_file():
+        raise ConfigurationPathError(f"configuration path is not a file: {path}")
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ConfigurationPathError(
+            f"cannot read configuration file: {path}"
+        ) from error
+
+
+def _load_config_text(root: Path, config_path: Path | None) -> str | None:
+    path, explicit = resolve_config_path(root, config_path)
+    return _configuration_text(path, explicit=explicit)
+
+
+def load_config(root: Path, config_path: Path | None = None) -> ProjectConfig:
+    text = _load_config_text(root, config_path)
+    if text is None:
         return ProjectConfig()
-    text = path.read_text(encoding="utf-8")
     try:
         composed = yaml.compose(text, Loader=yaml.SafeLoader)
         if composed is not None:

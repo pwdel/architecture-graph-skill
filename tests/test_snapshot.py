@@ -102,10 +102,12 @@ def bundle(path: str = "docs/adr/ADR-001.md") -> SnapshotBundle:
     )
 
 
-def observation(observed_at: str) -> dict[str, object]:
+def observation(
+    observed_at: str = "2026-07-19T10:00:00Z",
+) -> dict[str, object]:
     return {
         "branch": "main",
-        "commit": "abc123",
+        "commit": "a" * 40,
         "dirty_fingerprint": CONFIG_DIGEST,
         "observed_at": observed_at,
     }
@@ -623,3 +625,93 @@ def test_reader_rejects_noncanonical_manifest_bytes(
 
     with pytest.raises(ValueError, match="snapshot integrity"):
         SnapshotReader.open(project, published.snapshot_id)
+
+
+def test_invalid_observation_is_rejected_before_staging(
+    architecture_repo: Path, tmp_path: Path
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    with pytest.raises(ValueError, match="canonical UTC"):
+        publish_snapshot(
+            project,
+            bundle(),
+            observation(observed_at="2026-07-19T10:00:00+00:00"),
+            None,
+        )
+    staging = project.project_dir / ".staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
+    assert not project.current_path.exists()
+
+
+def test_empty_observation_branch_is_rejected_before_staging(
+    architecture_repo: Path, tmp_path: Path
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    invalid = {**observation(), "branch": ""}
+    with pytest.raises(ValueError, match="nonempty string or null"):
+        publish_snapshot(project, bundle(), invalid, None)
+    staging = project.project_dir / ".staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
+
+
+@pytest.mark.parametrize("commit", [None, "a" * 40, "b" * 64])
+def test_observation_accepts_null_sha1_and_sha256_commits(
+    architecture_repo: Path, tmp_path: Path, commit: str | None
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    published = publish_snapshot(
+        project,
+        bundle(),
+        {**observation(), "commit": commit},
+        None,
+    )
+    assert SnapshotReader.open(project).snapshot_id == published.snapshot_id
+    observed = observe_existing_snapshot(
+        project,
+        SnapshotReader.open(project, published.snapshot_id),
+        {
+            **observation("2026-07-19T11:00:00Z"),
+            "commit": commit,
+        },
+        published.snapshot_id,
+    )
+    assert observed.snapshot_id == published.snapshot_id
+
+
+@pytest.mark.parametrize("commit", ["", "abc123", "A" * 40, "g" * 40])
+def test_publish_rejects_invalid_commit_before_any_write(
+    architecture_repo: Path, tmp_path: Path, commit: str
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    with pytest.raises(ValueError, match="lowercase SHA-1/SHA-256"):
+        publish_snapshot(
+            project,
+            bundle(),
+            {**observation(), "commit": commit},
+            None,
+        )
+    assert not project.current_path.exists()
+    assert not project.observations_path.exists()
+    staging = project.project_dir / ".staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
+
+
+def test_observe_rejects_invalid_commit_without_pointer_or_ledger_write(
+    architecture_repo: Path, tmp_path: Path,
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    first = publish_snapshot(project, bundle(), observation(), None)
+    reader = SnapshotReader.open(project, first.snapshot_id)
+    pointer_before = project.current_path.read_bytes()
+    ledger_before = project.observations_path.read_bytes()
+    with pytest.raises(ValueError, match="lowercase SHA-1/SHA-256"):
+        observe_existing_snapshot(
+            project,
+            reader,
+            {**observation("2026-07-19T11:00:00Z"), "commit": "invalid"},
+            first.snapshot_id,
+        )
+    assert project.current_path.read_bytes() == pointer_before
+    assert project.observations_path.read_bytes() == ledger_before
+    staging = project.project_dir / ".staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
