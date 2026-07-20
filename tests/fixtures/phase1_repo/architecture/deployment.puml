@@ -1,0 +1,6 @@
+@startuml
+component Checkout
+database Orders
+Checkout -> Orders : writes orders
+Orders --> Warehouse : publishes OrderPlaced
+@enduml

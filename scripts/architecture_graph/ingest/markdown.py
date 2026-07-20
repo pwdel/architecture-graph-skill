@@ -401,14 +401,24 @@ def segment_markdown(
                         derivation_ids=(derivation_id,),
                     )
                 )
-            elif language.casefold() in {"mermaid", "mmd"}:
+            elif language.casefold() in {
+                "mermaid",
+                "mmd",
+                "plantuml",
+                "puml",
+            }:
+                diagram_language = (
+                    "mermaid"
+                    if language.casefold() in {"mermaid", "mmd"}
+                    else "plantuml"
+                )
                 diagram_derivation = derivation_record(
-                    source, "mermaid_segmenter", context
+                    source, f"{diagram_language}_segmenter", context
                 )
                 diagram_id = str(diagram_derivation["id"])
                 result = diagram_statement_records(
                     source,
-                    "mermaid",
+                    diagram_language,
                     block,
                     heading_path(),
                     enclosing_role,

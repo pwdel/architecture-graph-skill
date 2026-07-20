@@ -265,6 +265,15 @@ def diagram_statement_records(
                     )
                 )
                 continue
+            metadata: dict[str, object] = {
+                "diagram_language": language,
+                "content_role": "diagram",
+                "section_role": section_role,
+            }
+            if adr_id is not None:
+                metadata["adr_id"] = adr_id
+            if adr_status is not None:
+                metadata["adr_status"] = adr_status
             segment, item_evidence = segment_and_evidence(
                 source,
                 segment_kind="diagram_statement",
@@ -272,13 +281,7 @@ def diagram_statement_records(
                 evidence_text=statement,
                 span=span,
                 heading_path=heading_path,
-                metadata={
-                    "diagram_language": language,
-                    "content_role": "diagram",
-                    "section_role": section_role,
-                    "adr_id": adr_id,
-                    "adr_status": adr_status,
-                },
+                metadata=metadata,
                 derivation_ids=derivation_ids,
                 ordinal=ordinal_start + len(segments),
             )
@@ -288,4 +291,56 @@ def diagram_statement_records(
         segments=tuple(segments),
         evidence=tuple(evidence),
         warnings=tuple(warnings),
+    )
+
+
+def segment_diagram(
+    source: SourceInput,
+    context: IngestionContext,
+    language: str | None = None,
+) -> IngestionResult:
+    selected_language = language or source.source_kind
+    if selected_language not in {"mermaid", "plantuml"}:
+        raise ValueError(f"unsupported diagram language: {selected_language}")
+    derivation = derivation_record(source, f"{selected_language}_segmenter", context)
+    derivation_id = str(derivation["id"])
+    if source.decode_error is not None:
+        warning = warning_record(
+            source,
+            code="parse_failed",
+            message=source.decode_error,
+            span=None,
+            possible_role="diagram",
+            derivation_ids=(derivation_id,),
+        )
+        return IngestionResult(derivations=(derivation,), warnings=(warning,))
+    result = diagram_statement_records(
+        source,
+        selected_language,
+        list(enumerate(source.text.splitlines(), start=1)),
+        (),
+        "diagram",
+        (derivation_id,),
+        0,
+        context.max_segment_chars,
+        None,
+        None,
+    )
+    if source.text.strip() and not result.segments and not result.warnings:
+        warning = warning_record(
+            source,
+            code="unsupported_construct",
+            message=(
+                f"no supported {selected_language} relationship statements found"
+            ),
+            span=SourceSpan(1, max(1, len(source.text.splitlines()))),
+            possible_role="diagram",
+            derivation_ids=(derivation_id,),
+        )
+        return IngestionResult(derivations=(derivation,), warnings=(warning,))
+    return IngestionResult(
+        segments=result.segments,
+        evidence=result.evidence,
+        derivations=(derivation,),
+        warnings=result.warnings,
     )
