@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
 import pytest
 
+import architecture_graph.snapshot as snapshot_module
 from architecture_graph.canonical import (
     canonical_bytes,
     sha256_digest,
@@ -107,6 +109,25 @@ def observation(observed_at: str) -> dict[str, object]:
         "dirty_fingerprint": CONFIG_DIGEST,
         "observed_at": observed_at,
     }
+
+
+def changed_bundle(original: SnapshotBundle, **changes: object) -> SnapshotBundle:
+    return SnapshotBundle(**{**original.__dict__, **changes})
+
+
+def reidentify_snapshot(
+    snapshot_dir: Path, manifest: dict[str, object]
+) -> tuple[str, Path]:
+    manifest_core = {
+        key: value for key, value in manifest.items() if key != "content_digest"
+    }
+    content_digest = sha256_digest(canonical_bytes(manifest_core))
+    manifest["content_digest"] = content_digest
+    (snapshot_dir / "manifest.json").write_bytes(canonical_bytes(manifest))
+    digest_hex = content_digest.removeprefix("sha256:")
+    target = snapshot_dir.parent / digest_hex
+    snapshot_dir.rename(target)
+    return f"{manifest['snapshot_kind']}:{digest_hex}", target
 
 
 def test_observation_time_does_not_change_snapshot_identity(
@@ -290,6 +311,38 @@ def test_exact_duplicate_is_deduplicated_but_conflict_is_rejected(
         )
 
 
+def test_nfc_equivalent_record_ids_are_deduplicated_before_writing(
+    architecture_repo: Path, tmp_path: Path
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    original = bundle()
+    decomposed = finalize_record(
+        {"id": "term:Cafe\u0301", "kind": "term", "label": "Cafe\u0301"}
+    )
+    composed = finalize_record(
+        {"id": "term:Caf\u00e9", "kind": "term", "label": "Caf\u00e9"}
+    )
+    with_equivalent_terms = changed_bundle(
+        original,
+        records_by_type={
+            **original.records_by_type,
+            "terms": [decomposed, composed],
+        },
+    )
+
+    published = publish_snapshot(
+        project,
+        with_equivalent_terms,
+        observation("2026-07-19T10:00:00Z"),
+        None,
+    )
+
+    assert [record["id"] for record in SnapshotReader.open(project).iter("terms")] == [
+        "term:Caf\u00e9"
+    ]
+    assert published.snapshot_dir.is_dir()
+
+
 def test_broken_references_fail_before_publication(
     architecture_repo: Path, tmp_path: Path
 ) -> None:
@@ -311,3 +364,262 @@ def test_broken_references_fail_before_publication(
             project, broken, observation("2026-07-19T10:00:00Z"), None
         )
     assert not project.current_path.exists()
+
+
+@pytest.mark.parametrize(
+    "tamper", ["false_pipeline", "false_source_revision", "missing_payload"]
+)
+def test_reader_and_collision_reuse_reject_self_consistent_tampering(
+    architecture_repo: Path, tmp_path: Path, tamper: str
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    published = publish_snapshot(
+        project, bundle(), observation("2026-07-19T10:00:00Z"), None
+    )
+    manifest = json.loads(
+        (published.snapshot_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    if tamper == "false_pipeline":
+        manifest["deterministic_pipeline_digest"] = "sha256:" + ("7" * 64)
+    elif tamper == "false_source_revision":
+        manifest["source_revision_digest"] = "sha256:" + ("8" * 64)
+    else:
+        (published.snapshot_dir / "warnings.jsonl").unlink()
+        manifest["payload_files"].pop("warnings.jsonl")
+
+    snapshot_id, snapshot_dir = reidentify_snapshot(
+        published.snapshot_dir, manifest
+    )
+    with pytest.raises(ValueError, match="snapshot integrity"):
+        SnapshotReader.open(project, snapshot_id)
+    with pytest.raises(ValueError, match="collision"):
+        snapshot_module._verify_collision(snapshot_dir, manifest)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("unknown_type", "unknown snapshot record types"),
+        ("malformed_digest", "invalid snapshot configuration_digest"),
+        ("zero_schema", "schema_versions"),
+        ("bad_schema", "schema_versions"),
+        ("invalid_analysis_parent", "invalid analysis parent snapshot ID"),
+        ("layered_parent", "layered parent fields"),
+        ("layered_kind", "Phase 1 publishes deterministic"),
+        ("fingerprint", "pipeline fingerprint"),
+        ("source_revision", "source revision digest mismatch"),
+        ("duplicate", "conflicting duplicate"),
+        ("reference", "broken reference"),
+        ("record_id", "ID must start with term:"),
+    ],
+)
+def test_finalizer_and_publication_share_side_effect_free_validation(
+    architecture_repo: Path,
+    tmp_path: Path,
+    case: str,
+    message: str,
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    original = bundle()
+    changes: dict[str, object]
+    if case == "unknown_type":
+        changes = {"records_by_type": {"soruces": []}}
+    elif case == "malformed_digest":
+        changes = {"configuration_digest": "bad"}
+    elif case == "zero_schema":
+        changes = {"schema_versions": {"snapshot": 0, "records": 1}}
+    elif case == "bad_schema":
+        changes = {"schema_versions": {"snapshot": "1", "records": 1}}
+    elif case == "invalid_analysis_parent":
+        changes = {"analysis_parent_snapshot_id": "not-a-snapshot"}
+    elif case == "layered_parent":
+        changes = {"parent_snapshot_id": "deterministic:" + ("1" * 64)}
+    elif case == "layered_kind":
+        changes = {"snapshot_kind": "reviewed"}
+    elif case == "fingerprint":
+        changes = {
+            "pipeline_fingerprint": {
+                **PIPELINE_PREIMAGE,
+                "packages": {"PyYAML": "different"},
+            }
+        }
+    elif case == "source_revision":
+        changes = {"source_revision_digest": "sha256:" + ("8" * 64)}
+    elif case == "duplicate":
+        source = original.records_by_type["sources"][0]
+        conflicting = dict(source)
+        conflicting["path"] = "docs/adr/ADR-002.md"
+        changes = {
+            "records_by_type": {
+                **original.records_by_type,
+                "sources": [source, finalize_record(conflicting)],
+            }
+        }
+    elif case == "reference":
+        source = dict(original.records_by_type["sources"][0])
+        source["warning_ids"] = ["warning:missing"]
+        changes = {
+            "records_by_type": {
+                **original.records_by_type,
+                "sources": [finalize_record(source)],
+            }
+        }
+    else:
+        malformed = finalize_record({"id": "source:not-a-term", "kind": "term"})
+        changes = {
+            "records_by_type": {
+                **original.records_by_type,
+                "terms": [malformed],
+            }
+        }
+    invalid = changed_bundle(original, **changes)
+
+    with pytest.raises(ValueError, match=message):
+        SnapshotFinalizer(project, invalid).validate()
+    assert not project.project_dir.exists()
+
+    with pytest.raises(ValueError, match=message):
+        publish_snapshot(
+            project, invalid, observation("2026-07-19T10:00:00Z"), None
+        )
+    assert not project.project_dir.exists()
+
+
+def test_report_is_canonical_and_semantic_equivalents_share_identity(
+    architecture_repo: Path, tmp_path: Path
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    decomposed = changed_bundle(
+        bundle(), report="# Cafe\u0301\r\n\rBody\r\n\n\n"
+    )
+    composed = changed_bundle(bundle(), report="# Caf\u00e9\n\nBody\n")
+
+    first = publish_snapshot(
+        project, decomposed, observation("2026-07-19T10:00:00Z"), None
+    )
+    second = publish_snapshot(
+        project,
+        composed,
+        observation("2026-07-19T11:00:00Z"),
+        first.snapshot_id,
+    )
+
+    assert (first.snapshot_dir / "report.md").read_bytes() == (
+        "# Caf\u00e9\n\nBody\n".encode()
+    )
+    assert second.snapshot_id == first.snapshot_id
+    assert second.reused is True
+
+
+def test_observing_an_open_reader_revalidates_before_writing(
+    architecture_repo: Path, tmp_path: Path
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    published = publish_snapshot(
+        project, bundle(), observation("2026-07-19T10:00:00Z"), None
+    )
+    reader = SnapshotReader.open(project)
+    current_before = project.current_path.read_bytes()
+    observations_before = project.observations_path.read_bytes()
+    (published.snapshot_dir / "sources.jsonl").write_text("corrupt\n")
+
+    with pytest.raises(ValueError, match="snapshot integrity"):
+        observe_existing_snapshot(
+            project,
+            reader,
+            observation("2026-07-19T11:00:00Z"),
+            published.snapshot_id,
+        )
+
+    assert project.current_path.read_bytes() == current_before
+    assert project.observations_path.read_bytes() == observations_before
+
+
+def test_install_fsyncs_staging_and_snapshot_parents(
+    architecture_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    synced: list[Path] = []
+    real_sync = snapshot_module._sync
+
+    def track_sync(path: Path) -> None:
+        synced.append(path)
+        real_sync(path)
+
+    monkeypatch.setattr(snapshot_module, "_sync", track_sync)
+    publish_snapshot(
+        project, bundle(), observation("2026-07-19T10:00:00Z"), None
+    )
+
+    assert synced[-2:] == [project.project_dir / ".staging", project.snapshots_dir]
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["extra_manifest_key", "noncanonical_jsonl", "duplicate_record", "report_crlf"],
+)
+def test_reader_rejects_self_consistent_noncanonical_snapshots(
+    architecture_repo: Path, tmp_path: Path, tamper: str
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    published = publish_snapshot(
+        project, bundle(), observation("2026-07-19T10:00:00Z"), None
+    )
+    manifest = json.loads(
+        (published.snapshot_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    if tamper == "extra_manifest_key":
+        manifest["unexpected"] = True
+    elif tamper == "report_crlf":
+        report_path = published.snapshot_dir / "report.md"
+        report_path.write_bytes(b"# Ingestion\r\n\r\nOne source.\r\n")
+        manifest["payload_files"]["report.md"] = sha256_digest(
+            report_path.read_bytes()
+        )
+    else:
+        source_path = published.snapshot_dir / "sources.jsonl"
+        record = json.loads(source_path.read_text(encoding="utf-8"))
+        if tamper == "noncanonical_jsonl":
+            source_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        else:
+            source_path.write_bytes(canonical_bytes(record) * 2)
+        manifest["payload_files"]["sources.jsonl"] = sha256_digest(
+            source_path.read_bytes()
+        )
+
+    snapshot_id, _ = reidentify_snapshot(published.snapshot_dir, manifest)
+    with pytest.raises(ValueError, match="snapshot integrity"):
+        SnapshotReader.open(project, snapshot_id)
+
+
+def test_reader_rejects_symlink_payload(
+    architecture_repo: Path, tmp_path: Path
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    published = publish_snapshot(
+        project, bundle(), observation("2026-07-19T10:00:00Z"), None
+    )
+    external = project.project_dir / "external-empty.jsonl"
+    external.write_bytes(b"")
+    payload = published.snapshot_dir / "warnings.jsonl"
+    payload.unlink()
+    payload.symlink_to(external)
+
+    with pytest.raises(ValueError, match="snapshot integrity"):
+        SnapshotReader.open(project, published.snapshot_id)
+
+
+def test_reader_rejects_noncanonical_manifest_bytes(
+    architecture_repo: Path, tmp_path: Path
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    published = publish_snapshot(
+        project, bundle(), observation("2026-07-19T10:00:00Z"), None
+    )
+    manifest_path = published.snapshot_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="snapshot integrity"):
+        SnapshotReader.open(project, published.snapshot_id)
