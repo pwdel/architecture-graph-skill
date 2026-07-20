@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SKILL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -x "$SKILL_ROOT/.venv/bin/python" ]]; then
+  exec "$SKILL_ROOT/.venv/bin/python" -m architecture_graph.cli "$@"
+fi
+printf '%s\n' 'architecture-graph: environment missing; run `uv sync --frozen` in the skill directory' >&2
+exit 2

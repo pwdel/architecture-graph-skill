@@ -1,0 +1,4 @@
+interface:
+  display_name: "Architecture Graph"
+  short_description: "Rank and review architecture decisions"
+  default_prompt: "Use $architecture-graph to index repository architecture sources and return a compact, evidence-backed decision brief."
