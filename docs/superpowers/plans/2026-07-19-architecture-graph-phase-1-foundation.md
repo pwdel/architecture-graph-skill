@@ -729,6 +729,7 @@ PHASE1_REQUIRED_FIELDS = {
             "previous_current_snapshot_id",
             "base_deterministic_snapshot_id",
             "material_input_digest",
+            "source_revision_digest",
             "branch",
             "commit",
             "dirty_fingerprint",
@@ -954,6 +955,7 @@ def validate_record_shape(record: Mapping[str, object]) -> None:
         require_string("previous_current_snapshot_id", nullable=True)
         require_string("base_deterministic_snapshot_id", nullable=True)
         require_digest("material_input_digest")
+        require_digest("source_revision_digest")
         require_string("branch", nullable=True)
         require_string("commit", nullable=True)
         require_digest("dirty_fingerprint")
@@ -993,6 +995,7 @@ git commit -m "feat: add canonical record contracts"
 - Produces: `discover_sources(root: Path, config: ProjectConfig) -> list[SourceInput]`.
 - Produces: `source_record_base(input: SourceInput, logical_source_id: str) -> dict[str, object]`; records are finalized only after adapter provenance, parsed identifiers, rename resolution, and parse status are known.
 - Produces: `material_input_digest(inputs: Sequence[SourceInput], config: ProjectConfig, pipeline_digest: str) -> str`.
+- Produces: `source_revision_digest(inputs: Sequence[SourceInput]) -> str`; its versioned preimage contains only the sorted set of unique selected source content hashes.
 - Task 10 binds canonical rename-resolution inputs into the snapshot `input_digest`; freshness remains a function of current source/configuration/pipeline material so a completed rename does not force a second rebuild.
 - A repeated explicit ADR/document ID is legal only when every occurrence has the same content hash. Exact byte copies share one logical-source identity; the same explicit ID on different bytes is an authoring error and fails before publication.
 
@@ -1094,6 +1097,33 @@ def test_only_configured_untracked_files_enter_manifest(architecture_repo: Path)
     assert inputs[1].tracked is False
 
 
+def test_tracked_file_cannot_be_reclassified_through_untracked(
+    architecture_repo: Path,
+) -> None:
+    from conftest import git
+
+    tracked = architecture_repo / "notes.md"
+    tracked.write_text("# Tracked but outside default includes\n")
+    git(architecture_repo, "add", "notes.md")
+    git(architecture_repo, "commit", "-m", "add tracked note")
+    (architecture_repo / ".architecture-graph.yaml").write_text(
+        "schema_version: 1\nuntracked:\n  - notes.md\n"
+    )
+    with pytest.raises(ValueError, match="configured untracked source is tracked"):
+        discover_sources(architecture_repo, load_config(architecture_repo))
+
+
+def test_redundant_untracked_entry_keeps_selected_tracked_provenance(
+    architecture_repo: Path,
+) -> None:
+    (architecture_repo / ".architecture-graph.yaml").write_text(
+        "schema_version: 1\nuntracked:\n  - docs/adr/ADR-001.md\n"
+    )
+    item = discover_sources(architecture_repo, load_config(architecture_repo))[0]
+    assert item.tracked is True
+    assert item.git_blob is not None
+
+
 def test_plain_text_requires_an_explicit_pattern(architecture_repo: Path) -> None:
     notes = architecture_repo / "docs" / "architecture" / "notes.txt"
     notes.parent.mkdir(parents=True)
@@ -1161,6 +1191,32 @@ def test_dirty_content_and_pipeline_code_change_material_digest(
     module.write_text("RULE = 2\n")
     second_pipeline = pipeline_fingerprint(pipeline_root)
     assert material_input_digest(second_inputs, config, second_pipeline.digest) != second
+
+
+def test_source_revision_digest_uses_unique_content_hashes_only(
+    architecture_repo: Path,
+) -> None:
+    from architecture_graph.sources import SourceInput, source_revision_digest
+
+    inputs = discover_sources(architecture_repo, load_config(architecture_repo))
+    assert source_revision_digest(inputs) == sha256_digest(
+        canonical_bytes(sorted({item.content_hash for item in inputs}))
+    )
+    duplicate = SourceInput(
+        **{
+            **inputs[0].__dict__,
+            "relative_path": "docs/adr/copy.md",
+            "absolute_path": architecture_repo / "docs" / "adr" / "copy.md",
+        }
+    )
+    assert source_revision_digest([*inputs, duplicate]) == source_revision_digest(inputs)
+    changed = SourceInput(
+        **{
+            **inputs[0].__dict__,
+            "content_hash": "sha256:" + ("f" * 64),
+        }
+    )
+    assert source_revision_digest([changed]) != source_revision_digest(inputs)
 
 
 def test_memory_root_precedence(architecture_repo: Path, tmp_path: Path, monkeypatch) -> None:
@@ -1765,6 +1821,7 @@ def discover_sources(root: Path, config: ProjectConfig) -> list[SourceInput]:
         for item in _git_bytes(root, "ls-files", "-z").split(b"\0")
         if item
     )
+    tracked_set = set(tracked)
     selected = {
         path: True
         for path in tracked
@@ -1778,6 +1835,11 @@ def discover_sources(root: Path, config: ProjectConfig) -> list[SourceInput]:
         normalized = Path(path).as_posix()
         if normalized in selected:
             continue
+        if normalized in tracked_set:
+            raise ValueError(
+                "configured untracked source is tracked but excluded by include/exclude: "
+                f"{normalized}"
+            )
         if not (root / normalized).is_file():
             raise ValueError(f"configured untracked source does not exist: {normalized}")
         if _kind(normalized) == "unsupported":
@@ -1854,6 +1916,11 @@ def material_input_digest(
         "pipeline_digest": pipeline_digest,
     }
     return sha256_digest(canonical_bytes(payload))
+
+
+def source_revision_digest(inputs: Sequence[SourceInput]) -> str:
+    unique_content_hashes = sorted({item.content_hash for item in inputs})
+    return sha256_digest(canonical_bytes(unique_content_hashes))
 ```
 
 `git_blob` is the repository's Git-object hash of the exact working-tree bytes already read into `raw`, not the potentially stale index entry at `:path`. It is therefore a deterministic function of the selected bytes under the repository's object format. Staging unchanged working bytes cannot make a reused snapshot's source provenance stale.
@@ -1919,6 +1986,7 @@ def observation_record(record_id: str) -> dict[str, object]:
             "previous_current_snapshot_id": None,
             "base_deterministic_snapshot_id": "deterministic:" + ("b" * 64),
             "material_input_digest": digest,
+            "source_revision_digest": digest,
             "branch": "main",
             "commit": "abc123",
             "dirty_fingerprint": digest,
@@ -2199,6 +2267,7 @@ git commit -m "feat: add atomic JSONL storage"
 - Produces: `SnapshotReader.open(project: ProjectPaths, snapshot_id: str | None = None) -> SnapshotReader`.
 - Produces: `publish_snapshot(project: ProjectPaths, bundle: SnapshotBundle, observation: Mapping[str, JSONValue], expected_current_snapshot_id: str | None) -> PublishedSnapshot`.
 - Produces: `observe_existing_snapshot(project, reader, observation, expected_current_snapshot_id) -> PublishedSnapshot` without rebuilding payloads.
+- Requires `source_revision_digest` on every bundle and persists it in both `manifest.json` and every observation record so later history reduction does not require a schema migration.
 - Restricts the Phase 1 writer to deterministic bundles with no layered parent fields. The reader recognizes layered IDs for forward compatibility; Phase 2 supplies enriched/reviewed kind-specific publication validators.
 - Persists the exact runtime, dependency-version, and implementation-file fingerprint preimage in `manifest.json` and verifies that it hashes to `deterministic_pipeline_digest`.
 
@@ -2237,6 +2306,7 @@ PIPELINE_DIGEST = sha256_digest(canonical_bytes(PIPELINE_PREIMAGE))
 CONTENT_DIGEST = "sha256:" + "c" * 64
 EMPTY_REVIEWS_DIGEST = "sha256:" + "d" * 64
 MATERIAL_DIGEST = "sha256:" + "e" * 64
+SOURCE_REVISION_DIGEST = "sha256:" + "9" * 64
 INPUT_DIGEST = "sha256:" + "f" * 64
 
 
@@ -2291,6 +2361,7 @@ def bundle(path: str = "docs/adr/ADR-001.md") -> SnapshotBundle:
         schema_versions={"snapshot": 1, "records": 1},
         frozen_review_set_digest=EMPTY_REVIEWS_DIGEST,
         material_input_digest=MATERIAL_DIGEST,
+        source_revision_digest=SOURCE_REVISION_DIGEST,
         deterministic_pipeline_digest=PIPELINE_DIGEST,
         pipeline_fingerprint=PIPELINE_PREIMAGE,
         input_digest=INPUT_DIGEST,
@@ -2421,6 +2492,14 @@ def test_phase1_writer_rejects_layered_kinds_and_fingerprint_mismatch(
     with pytest.raises(ValueError, match="pipeline fingerprint"):
         publish_snapshot(
             project, mismatched, observation("2026-07-19T10:00:00Z"), None
+        )
+
+    invalid_revision = SnapshotBundle(
+        **{**bundle().__dict__, "source_revision_digest": "sha256:short"}
+    )
+    with pytest.raises(ValueError, match="source_revision_digest"):
+        publish_snapshot(
+            project, invalid_revision, observation("2026-07-19T10:00:00Z"), None
         )
 
 
@@ -2596,6 +2675,7 @@ class SnapshotBundle:
     schema_versions: Mapping[str, JSONValue]
     frozen_review_set_digest: str
     material_input_digest: str
+    source_revision_digest: str
     deterministic_pipeline_digest: str
     pipeline_fingerprint: Mapping[str, JSONValue]
     input_digest: str
@@ -2632,6 +2712,7 @@ class SnapshotWriter:
             "schema_versions",
             "frozen_review_set_digest",
             "material_input_digest",
+            "source_revision_digest",
             "deterministic_pipeline_digest",
             "pipeline_fingerprint",
             "input_digest",
@@ -2661,6 +2742,7 @@ class SnapshotWriter:
             schema_versions=dict(core["schema_versions"]),
             frozen_review_set_digest=str(core["frozen_review_set_digest"]),
             material_input_digest=str(core["material_input_digest"]),
+            source_revision_digest=str(core["source_revision_digest"]),
             deterministic_pipeline_digest=str(core["deterministic_pipeline_digest"]),
             pipeline_fingerprint=dict(core["pipeline_fingerprint"]),
             input_digest=str(core["input_digest"]),
@@ -2884,6 +2966,7 @@ def _write_stage(
         "configuration_digest": bundle.configuration_digest,
         "frozen_review_set_digest": bundle.frozen_review_set_digest,
         "material_input_digest": bundle.material_input_digest,
+        "source_revision_digest": bundle.source_revision_digest,
         "deterministic_pipeline_digest": bundle.deterministic_pipeline_digest,
         "input_digest": bundle.input_digest,
     }.items():
@@ -2943,6 +3026,7 @@ def _write_stage(
             "configuration_digest": bundle.configuration_digest,
             "frozen_review_set_digest": bundle.frozen_review_set_digest,
             "material_input_digest": bundle.material_input_digest,
+            "source_revision_digest": bundle.source_revision_digest,
             "deterministic_pipeline_digest": bundle.deterministic_pipeline_digest,
             "pipeline_fingerprint": dict(bundle.pipeline_fingerprint),
             "input_digest": bundle.input_digest,
@@ -3022,6 +3106,7 @@ def publish_snapshot(
                 bundle.base_deterministic_snapshot_id or snapshot_id
             ),
             "material_input_digest": bundle.material_input_digest,
+            "source_revision_digest": bundle.source_revision_digest,
             **dict(observation),
         }
     )
@@ -3103,6 +3188,7 @@ def observe_existing_snapshot(
                 )
                 or reader.snapshot_id,
                 "material_input_digest": reader.manifest["material_input_digest"],
+                "source_revision_digest": reader.manifest["source_revision_digest"],
                 **dict(observation),
             }
         )
@@ -3764,8 +3850,8 @@ from architecture_graph.ingest import IngestionContext
 
 
 CONTEXT = IngestionContext(
-    configuration_digest="sha256:test-config",
-    pipeline_digest="sha256:test-pipeline",
+    configuration_digest="sha256:" + ("a" * 64),
+    pipeline_digest="sha256:" + ("b" * 64),
     tool_version="0.1.0",
 )
 ```
@@ -4698,7 +4784,11 @@ from architecture_graph.sources import SourceInput
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "phase1_repo"
-CONTEXT = IngestionContext("sha256:test-config", "sha256:test-pipeline", "0.1.0")
+CONTEXT = IngestionContext(
+    "sha256:" + ("a" * 64),
+    "sha256:" + ("b" * 64),
+    "0.1.0",
+)
 
 
 def source(relative_path: str, source_kind: str, text: str | None = None) -> SourceInput:
@@ -5661,7 +5751,7 @@ git commit -m "feat: ingest structured and configured text sources"
 - Produces: `IndexResult(snapshot_id, observation_id, reused, source_count, segment_count, warning_count)`.
 - Produces: `index_repository(root: Path, memory_root: Path | None = None, config_path: Path | None = None, observed_at: str | None = None) -> IndexResult`.
 - Adds CLI command: `architecture-graph index ROOT [--memory-root PATH] [--config PATH] [--json]`.
-- Resolves source lineage only against the selected deterministic analysis parent. Git supplies the added/deleted candidate sets, but the indexer does not trust Git's arbitrary one-to-one rename assignment: it compares every selected deleted/added pair with the versioned line-sequence similarity, requires at least the exact rational threshold 3/5, and accepts only a unique best target-origin assignment with no competing reuse of the origin. Tied or competing matches enter canonical `RenameResolution.ambiguous_targets`, emit deterministic warnings, and fall back to add/remove semantics. Canonical pairs/ties enter `input_digest`.
+- Resolves source lineage only against the selected deterministic analysis parent. Git supplies added/deleted candidate sets, but never supplies parent content for matching. The indexer first compares every candidate's current content digest with the exact content digest persisted on the parent source record. It accepts only a unique exact target-origin assignment with no competing reuse of the origin. Tied exact matches enter canonical `RenameResolution.ambiguous_targets`; non-exact candidates enter `RenameResolution.unresolved_targets` because Phase 1 snapshots do not persist raw source bytes for a trustworthy similarity fallback. Both cases emit deterministic warnings and use add/remove semantics. Canonical pairs, ties, and unresolved candidates enter `input_digest`; Git-commit bytes must never stand in for dirty bytes indexed by the parent snapshot.
 
 - [ ] **Step 1: Configure and create a complete temporary fixture repository**
 
@@ -5745,6 +5835,7 @@ def test_index_publishes_every_phase1_payload(
     assert sha256_digest(
         canonical_bytes(reader.manifest["pipeline_fingerprint"])
     ) == reader.manifest["deterministic_pipeline_digest"]
+    assert reader.manifest["source_revision_digest"].startswith("sha256:")
     report = (reader.snapshot_dir / "report.md").read_text(encoding="utf-8")
     assert report.startswith("# Architecture Graph Ingestion\n")
     assert "2026-07-19" not in report
@@ -5800,6 +5891,16 @@ def test_unchanged_material_reuses_snapshot_but_adds_observation(
     assert second.snapshot_id == first.snapshot_id
     assert second.reused is True
     assert len(project.observations_path.read_text().splitlines()) == 2
+    observations = [
+        json.loads(line) for line in project.observations_path.read_text().splitlines()
+    ]
+    assert all(
+        item["source_revision_digest"]
+        == SnapshotReader.open(project, first.snapshot_id).manifest[
+            "source_revision_digest"
+        ]
+        for item in observations
+    )
 
 
 def test_staging_unchanged_working_bytes_reuses_matching_blob_provenance(
@@ -5947,6 +6048,84 @@ def test_path_fallback_logical_source_survives_unique_git_rename(
     assert renamed["logical_source_id"] == old["logical_source_id"]
 
 
+def test_dirty_parent_exact_digest_rename_preserves_logical_source(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    from conftest import git
+
+    original = phase1_repository / "docs" / "architecture" / "runtime.md"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_text("# Runtime\n\nCommitted wording.\n")
+    git(phase1_repository, "add", "docs/architecture/runtime.md")
+    git(phase1_repository, "commit", "-m", "add runtime")
+    original.write_text("# Runtime\n\nDirty indexed wording.\n")
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    first_reader = SnapshotReader.open(project, first.snapshot_id)
+    prior = next(
+        item for item in first_reader.iter("sources")
+        if item["path"] == "docs/architecture/runtime.md"
+    )
+
+    git(
+        phase1_repository,
+        "mv",
+        "docs/architecture/runtime.md",
+        "docs/architecture/worker-runtime.md",
+    )
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    renamed = next(
+        item for item in reader.iter("sources")
+        if item["path"] == "docs/architecture/worker-runtime.md"
+    )
+    assert renamed["content_hash"] == prior["content_hash"]
+    assert renamed["logical_source_id"] == prior["logical_source_id"]
+
+
+def test_dirty_parent_nonexact_rename_is_unresolved_not_commit_compared(
+    phase1_repository: Path, tmp_path: Path
+) -> None:
+    from conftest import git
+
+    original = phase1_repository / "docs" / "architecture" / "runtime.md"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_text("# Runtime\n\nCommitted wording.\n")
+    git(phase1_repository, "add", "docs/architecture/runtime.md")
+    git(phase1_repository, "commit", "-m", "add runtime")
+    original.write_text("# Runtime\n\nDirty indexed wording.\n")
+    memory = tmp_path / "memory"
+    first = index_repository(phase1_repository, memory_root=memory)
+    project = ProjectPaths.resolve(phase1_repository, memory)
+    prior = SnapshotReader.open(project, first.snapshot_id)
+    prior_source = next(
+        item for item in prior.iter("sources")
+        if item["path"] == "docs/architecture/runtime.md"
+    )
+
+    git(
+        phase1_repository,
+        "mv",
+        "docs/architecture/runtime.md",
+        "docs/architecture/worker-runtime.md",
+    )
+    target = phase1_repository / "docs" / "architecture" / "worker-runtime.md"
+    target.write_text("# Worker Runtime\n\nChanged again after the rename.\n")
+    second = index_repository(phase1_repository, memory_root=memory)
+    reader = SnapshotReader.open(project, second.snapshot_id)
+    renamed = next(
+        item for item in reader.iter("sources")
+        if item["path"] == "docs/architecture/worker-runtime.md"
+    )
+    assert renamed["logical_source_id"] != prior_source["logical_source_id"]
+    warning = next(
+        item for item in reader.iter("warnings")
+        if item["code"] == "unresolved_rename"
+    )
+    assert "parent snapshot has no persisted raw bytes" in warning["message"]
+
+
 def test_reusing_a_path_after_a_rename_allocates_a_new_logical_source(
     phase1_repository: Path, tmp_path: Path
 ) -> None:
@@ -6039,10 +6218,12 @@ def test_ambiguous_rename_tie_becomes_add_remove_and_durable_warning(
         canonical_bytes(
             {
                 "material_input_digest": reader.manifest["material_input_digest"],
+                "source_revision_digest": reader.manifest["source_revision_digest"],
                 "analysis_parent_snapshot_id": first.snapshot_id,
                 "rename_resolution": RenameResolution(
                     {},
                     {"docs/architecture/tied.md": old_paths},
+                    {},
                 ).as_digest_input(),
             }
         )
@@ -6084,8 +6265,6 @@ Create `scripts/architecture_graph/indexer.py` with these helpers:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from difflib import SequenceMatcher
-from fractions import Fraction
 import json
 from pathlib import Path
 import subprocess
@@ -6113,6 +6292,7 @@ from architecture_graph.sources import (
     SourceInput,
     discover_sources,
     material_input_digest,
+    source_revision_digest,
     source_record_id,
     source_record_base,
 )
@@ -6159,6 +6339,7 @@ def _source_metadata(ingestion: IngestionResult) -> dict[str, dict[str, object]]
 class RenameResolution:
     pairs: dict[str, str]
     ambiguous_targets: dict[str, tuple[str, ...]]
+    unresolved_targets: dict[str, tuple[str, ...]]
 
     def as_digest_input(self) -> dict[str, object]:
         return {
@@ -6166,6 +6347,10 @@ class RenameResolution:
             "ambiguous_targets": [
                 [new, list(old_paths)]
                 for new, old_paths in sorted(self.ambiguous_targets.items())
+            ],
+            "unresolved_targets": [
+                [new, list(old_paths)]
+                for new, old_paths in sorted(self.unresolved_targets.items())
             ],
         }
 
@@ -6184,34 +6369,25 @@ class RenameResolution:
                 if new in new_paths
                 and len([old for old in old_paths if old in prior_paths]) > 0
             },
+            {
+                new: tuple(old for old in old_paths if old in prior_paths)
+                for new, old_paths in self.unresolved_targets.items()
+                if new in new_paths
+                and len([old for old in old_paths if old in prior_paths]) > 0
+            },
         )
-
-
-RENAME_SIMILARITY_THRESHOLD = Fraction(3, 5)
-
-
-def _rename_similarity(old: bytes, new: bytes) -> Fraction:
-    old_lines = old.splitlines(keepends=True)
-    new_lines = new.splitlines(keepends=True)
-    if not old_lines and not new_lines:
-        return Fraction(1, 1)
-    matches = sum(
-        block.size
-        for block in SequenceMatcher(
-            None, old_lines, new_lines, autojunk=False
-        ).get_matching_blocks()
-    )
-    return Fraction(2 * matches, len(old_lines) + len(new_lines))
 
 
 def _git_rename_resolution(
     root: Path,
     previous_commit: str | None,
-    new_paths: set[str],
-    prior_paths: set[str],
+    current_content_hashes: Mapping[str, str],
+    prior_content_hashes: Mapping[str, str],
 ) -> RenameResolution:
     if previous_commit is None:
-        return RenameResolution({}, {})
+        return RenameResolution({}, {}, {})
+    new_paths = set(current_content_hashes)
+    prior_paths = set(prior_content_hashes)
     result = subprocess.run(
         [
             "git",
@@ -6258,58 +6434,41 @@ def _git_rename_resolution(
         if path in new_paths
     )
 
-    old_bytes = {
-        path: subprocess.run(
-            ["git", "-C", str(root), "show", f"{previous_commit}:{path}"],
-            check=True,
-            capture_output=True,
-        ).stdout
-        for path in sorted(deleted)
-    }
-    new_bytes = {
-        path: (root / path).read_bytes()
-        for path in sorted(added)
-        if (root / path).is_file()
-    }
-    scores: dict[tuple[str, str], Fraction] = {}
-    for new, new_value in new_bytes.items():
-        for old, old_value in old_bytes.items():
-            score = _rename_similarity(old_value, new_value)
-            if score >= RENAME_SIMILARITY_THRESHOLD:
-                scores[(new, old)] = score
-
-    tentative: dict[str, tuple[str, Fraction]] = {}
+    tentative: dict[str, str] = {}
     ambiguous: dict[str, tuple[str, ...]] = {}
-    for new in sorted(new_bytes):
-        candidates = {
-            old: score
-            for (candidate, old), score in scores.items()
-            if candidate == new
-        }
+    for new in sorted(added):
+        candidates = tuple(
+            old
+            for old in sorted(deleted)
+            if prior_content_hashes[old] == current_content_hashes[new]
+        )
         if not candidates:
             continue
-        best = max(candidates.values())
-        best_old = tuple(
-            sorted(old for old, score in candidates.items() if score == best)
-        )
-        if len(best_old) == 1:
-            tentative[new] = (best_old[0], best)
+        if len(candidates) == 1:
+            tentative[new] = candidates[0]
         else:
-            ambiguous[new] = best_old
+            ambiguous[new] = candidates
 
     pairs: dict[str, str] = {}
-    claimed_by_old: dict[str, list[tuple[str, Fraction]]] = {}
-    for new, (old, score) in tentative.items():
-        claimed_by_old.setdefault(old, []).append((new, score))
+    claimed_by_old: dict[str, list[str]] = {}
+    for new, old in tentative.items():
+        claimed_by_old.setdefault(old, []).append(new)
     for old, claims in sorted(claimed_by_old.items()):
-        best = max(score for _, score in claims)
-        winners = sorted(new for new, score in claims if score == best)
-        if len(winners) == 1:
-            pairs[winners[0]] = old
-        for new, _ in claims:
-            if new not in pairs:
+        if len(claims) == 1:
+            pairs[claims[0]] = old
+        else:
+            for new in sorted(claims):
                 ambiguous[new] = (old,)
-    return RenameResolution(dict(sorted(pairs.items())), dict(sorted(ambiguous.items())))
+    unresolved = {
+        new: tuple(sorted(deleted))
+        for new in sorted(added)
+        if deleted and new not in pairs and new not in ambiguous
+    }
+    return RenameResolution(
+        dict(sorted(pairs.items())),
+        dict(sorted(ambiguous.items())),
+        unresolved,
+    )
 
 
 def _observation_commit_for_snapshot(
@@ -6387,7 +6546,7 @@ def _logical_source_ids(
     return resolved
 
 
-def _ambiguous_rename_warnings(
+def _rename_resolution_warnings(
     inputs: Sequence[SourceInput],
     resolution: RenameResolution,
     context: IngestionContext,
@@ -6395,13 +6554,21 @@ def _ambiguous_rename_warnings(
     by_path = {item.relative_path: item for item in inputs}
     derivations: list[Record] = []
     warnings: list[Record] = []
-    for target, candidates in sorted(resolution.ambiguous_targets.items()):
+    cases = [
+        ("ambiguous_rename", target, candidates)
+        for target, candidates in sorted(resolution.ambiguous_targets.items())
+    ]
+    cases.extend(
+        ("unresolved_rename", target, candidates)
+        for target, candidates in sorted(resolution.unresolved_targets.items())
+    )
+    for code, target, candidates in cases:
         source = by_path.get(target)
         if source is None:
             continue
         source_id = source_record_id(source)
         resolution_key = stable_id(
-            "rename-resolution", target, list(candidates)
+            "rename-resolution", code, target, list(candidates)
         )
         derivation = finalize_record(
             {
@@ -6436,12 +6603,21 @@ def _ambiguous_rename_warnings(
         warnings.append(
             warning_record(
                 source,
-                code="ambiguous_rename",
+                code=code,
                 message=(
-                    f"Git rename target {target} has a non-unique origin assignment involving: "
-                    + ", ".join(candidates)
-                    + "; treating it as an add/remove"
-                ),
+                    (
+                        f"Git rename target {target} has a non-unique exact-digest "
+                        "origin assignment involving: "
+                    )
+                    if code == "ambiguous_rename"
+                    else (
+                        f"Git rename target {target} has no exact parent digest match; "
+                        "the parent snapshot has no persisted raw bytes for a "
+                        "trustworthy similarity comparison among: "
+                    )
+                )
+                + ", ".join(candidates)
+                + "; treating it as an add/remove",
                 span=None,
                 possible_role=source.document_role,
                 derivation_ids=(str(derivation["id"]),),
@@ -6645,6 +6821,7 @@ def index_repository(
         config_digest, pipeline_digest, __version__, config.max_segment_chars
     )
     material_digest = material_input_digest(inputs, config, pipeline_digest)
+    revision_digest = source_revision_digest(inputs)
     current = _current_reader(project)
     expected_current = None if current is None else current.snapshot_id
     analysis_parent_id = _analysis_parent_snapshot_id(current)
@@ -6655,16 +6832,24 @@ def index_repository(
         if current is not None and current.snapshot_id == analysis_parent_id
         else SnapshotReader.open(project, analysis_parent_id)
     )
-    prior_paths = (
-        set()
+    prior_content_hashes = (
+        {}
         if analysis_parent_reader is None
-        else {str(item["path"]) for item in analysis_parent_reader.iter("sources")}
+        else {
+            str(item["path"]): str(item["content_hash"])
+            for item in analysis_parent_reader.iter("sources")
+        }
     )
     previous_commit = _observation_commit_for_snapshot(project, analysis_parent_id)
-    current_paths = {item.relative_path for item in inputs}
+    current_content_hashes = {
+        item.relative_path: item.content_hash for item in inputs
+    }
     rename_resolution = _git_rename_resolution(
-        repository, previous_commit, current_paths, prior_paths
-    ).relevant_to(current_paths, prior_paths)
+        repository,
+        previous_commit,
+        current_content_hashes,
+        prior_content_hashes,
+    ).relevant_to(set(current_content_hashes), set(prior_content_hashes))
 
     git_observation = capture_git_observation(repository, observed_at)
     if current is not None and current.manifest.get("material_input_digest") == material_digest:
@@ -6684,6 +6869,7 @@ def index_repository(
         canonical_bytes(
             {
                 "material_input_digest": material_digest,
+                "source_revision_digest": revision_digest,
                 "analysis_parent_snapshot_id": analysis_parent_id,
                 "rename_resolution": rename_resolution.as_digest_input(),
             }
@@ -6692,7 +6878,7 @@ def index_repository(
 
     ingestion = ingest_sources(inputs, context)
     ingestion = ingestion.merge(
-        _ambiguous_rename_warnings(inputs, rename_resolution, context)
+        _rename_resolution_warnings(inputs, rename_resolution, context)
     )
     logical_source_ids = _logical_source_ids(
         project,
@@ -6723,6 +6909,7 @@ def index_repository(
         schema_versions={"snapshot": 1, "records": 1},
         frozen_review_set_digest=sha256_digest(b""),
         material_input_digest=material_digest,
+        source_revision_digest=revision_digest,
         deterministic_pipeline_digest=pipeline_digest,
         pipeline_fingerprint=pipeline.preimage,
         input_digest=input_digest,
@@ -6841,7 +7028,7 @@ git commit -m "feat: index deterministic architecture sources"
 - Modify: `tests/test_phase1_cli.py`
 
 **Interfaces:**
-- Produces: `memory_status(root, memory_root=None, config_path=None) -> QueryEnvelope`.
+- Produces: `memory_status(root, memory_root=None, config_path=None, fields=None, max_chars=12_000) -> QueryEnvelope`; `state` is mandatory and selected optional fields are projected before the character bound is checked.
 - Produces: `get_record(reader, record_type, record_id, fields=None, max_chars=12_000) -> QueryEnvelope`.
 - Produces: `find_records(reader, record_type, filters=None, contains=None, fields=None, limit=20, max_chars=12_000, cursor=None, expression=None) -> QueryEnvelope`.
 - Produces: `render_query_envelope(envelope, output_format) -> str` for canonical JSON or bounded Markdown; every format includes truncation and cursor metadata.
@@ -6885,6 +7072,37 @@ def test_status_detects_selected_source_changes(
     status = memory_status(phase1_repository, memory_root=memory)
     assert status.items[0]["state"] == "stale"
     assert status.items[0]["fresh"] is False
+
+
+def test_status_supports_field_projection_and_character_bounds(
+    phase1_repository: Path, tmp_path: Path, capsys
+) -> None:
+    memory = tmp_path / "memory"
+    index_repository(phase1_repository, memory_root=memory)
+    result = memory_status(
+        phase1_repository,
+        memory_root=memory,
+        fields=("snapshot_id",),
+        max_chars=1024,
+    )
+    assert set(result.items[0]) == {"state", "snapshot_id"}
+    assert len(render_query_envelope(result, "json")) <= 1024
+    assert main(
+        [
+            "memory",
+            "status",
+            str(phase1_repository),
+            "--memory-root",
+            str(memory),
+            "--fields",
+            "snapshot_id",
+            "--max-chars",
+            "1024",
+            "--json",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload["items"][0]) == {"state", "snapshot_id"}
 
 
 def test_get_and_find_return_complete_bounded_items_with_stable_cursor(
@@ -7305,11 +7523,25 @@ def memory_status(
     *,
     memory_root: Path | None = None,
     config_path: Path | None = None,
+    fields: Sequence[str] | None = None,
+    max_chars: int = 12_000,
 ) -> QueryEnvelope:
+    if max_chars < MIN_QUERY_CHARS:
+        raise ValueError(f"max_chars must be at least {MIN_QUERY_CHARS}")
+
+    def envelope(item: Record) -> QueryEnvelope:
+        selected = _project(item, fields)
+        if "state" not in selected:
+            selected = {"state": item["state"], **selected}
+        result = QueryEnvelope((selected,), max_chars=max_chars)
+        if not _fits(result):
+            raise ValueError("max_chars cannot fit the mandatory status envelope")
+        return result
+
     repository = root.resolve()
     project = ProjectPaths.resolve(repository, memory_root)
     if not project.current_path.is_file():
-        return QueryEnvelope(({"state": "missing", "fresh": False},))
+        return envelope({"state": "missing", "fresh": False})
     reader = SnapshotReader.open(project)
     config = load_config(repository, config_path)
     inputs = discover_sources(repository, config)
@@ -7337,7 +7569,7 @@ def memory_status(
         "snapshot_kind": reader.manifest.get("snapshot_kind"),
         "orphan_observation_count": orphan_count,
     }
-    return QueryEnvelope((item,))
+    return envelope(item)
 ```
 
 `memory_status` may scan Git and selected sources, but it does not call `mkdir`, write a cache, repair a ledger, or alter `current.json`.
@@ -7365,6 +7597,8 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("root", type=Path)
     status.add_argument("--memory-root", type=Path)
     status.add_argument("--config", type=Path)
+    status.add_argument("--fields")
+    status.add_argument("--max-chars", type=int, default=12_000)
     status.add_argument("--json", action="store_true")
 
     get = commands.add_parser("get", help="get one exact record")
@@ -7495,6 +7729,8 @@ Replace the body of `main()` between the `try:` and `except` with this dispatch,
                 args.root,
                 memory_root=args.memory_root,
                 config_path=args.config,
+                fields=_fields(args.fields),
+                max_chars=args.max_chars,
             )
             _print_result(result, as_json=args.json)
             return 2 if result.items[0].get("state") == "missing" else 0
@@ -7884,7 +8120,7 @@ review_authorities:
   architect@example.com: 1.0
 ```
 
-Tracked Markdown, Mermaid, PlantUML, YAML, and JSON files must match `include` and not `exclude`. Plain text additionally must match `plaintext`. An untracked path must be named exactly in `untracked`; no wildcard or implicit untracked scan occurs. `aliases` is a strict alias-to-terminal-canonical-identifier map. Keys and values are NFKC-normalized, whitespace-collapsed, and case-folded; self references, duplicate normalized aliases, and alias chains fail closed.
+Tracked Markdown, Mermaid, PlantUML, YAML, and JSON files must match `include` and not `exclude`. Plain text additionally must match `plaintext`. An actually untracked path must be named exactly in `untracked`; no wildcard or implicit untracked scan occurs. A tracked path named in `untracked` remains governed by `include` and `exclude`: a redundant selected entry keeps tracked Git-object provenance, while an excluded tracked entry fails configuration validation instead of being relabeled untracked. `aliases` is a strict alias-to-terminal-canonical-identifier map. Keys and values are NFKC-normalized, whitespace-collapsed, and case-folded; self references, duplicate normalized aliases, and alias chains fail closed.
 
 Memory-root precedence is `--memory-root`, then `ARCHITECTURE_GRAPH_MEMORY_ROOT`, then `$CODEX_HOME/memories/architecture-graph/projects`, then `~/.codex/memories/architecture-graph/projects`.
 
@@ -7899,10 +8135,10 @@ Replace `references/agent-usage.md` with:
 ## Status Before Indexing
 
 ```bash
-architecture-graph memory status . --json
+architecture-graph memory status . --fields state,fresh,snapshot_id --max-chars 12000 --json
 ```
 
-`missing` means no current snapshot. `stale` means selected source bytes, source metadata, configuration, or deterministic pipeline inputs differ. The command is strictly read-only.
+`missing` means no current snapshot. `stale` means selected source bytes, source metadata, configuration, or deterministic pipeline inputs differ. The command is strictly read-only. Like every read command, status supports field projection and a character budget; `state` remains mandatory so exit interpretation is stable.
 
 ## Build Phase 1 Memory
 
@@ -7910,7 +8146,7 @@ architecture-graph memory status . --json
 architecture-graph index . --json
 ```
 
-The result names the immutable snapshot and separate observation. Repeating unchanged material inputs reuses the snapshot and appends only an observation.
+The result names the immutable snapshot and separate observation. The manifest and observation both carry the versioned `source_revision_digest`, while `input_digest` also binds it with the analysis parent and canonical rename-resolution input. Repeating unchanged material inputs reuses the snapshot and appends only an observation.
 
 ## Bounded Reads
 
