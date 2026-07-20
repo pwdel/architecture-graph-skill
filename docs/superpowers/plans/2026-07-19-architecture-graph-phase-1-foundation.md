@@ -3896,7 +3896,7 @@ git commit -m "feat: segment ADRs and Mermaid evidence"
 
 **Preservation requirement:** Task 7 is a delta on the reviewed Task 6 parser, not permission to restore an older replacement snippet. Preserve strict YAML node and JSON-safe value validation, rejection of exact/NFKC key collisions and all YAML aliases, CommonMark `-`/`+`/`*`/ordered list boundaries, exact source-slice evidence, semicolon-bounded Mermaid statements, and fail-closed diagram warnings. Where the sample replacements below differ, port the Task 7 context/provenance/bounding changes into the current hardened implementation. Migrate every `segment_markdown` call in both Markdown test modules to the required context and keep all compatible Task 6 regressions green.
 
-**Intentional Task 6 supersession:** When a closing front-matter delimiter exists but its YAML is malformed or unsupported, emit one deterministic `unsupported_construct` warning, discard every metadata value/record, and continue segmenting the recoverable Markdown body after the delimiter. Update the Task 6 invalid-front-matter, duplicate/NFKC-key, non-JSON-value, and alias regressions to assert warning plus body recovery instead of zero body records. This exception changes recovery only: invalid metadata must never influence ADR identity/status, and a document without a closing delimiter remains on the existing fail-closed warning path.
+**Intentional Task 6 supersession:** When a closing front-matter delimiter exists but its YAML is malformed or unsupported, emit one deterministic `unsupported_construct` warning, discard every metadata value/record, and continue segmenting the recoverable Markdown body after the delimiter. Update the Task 6 invalid-front-matter, duplicate/NFKC-key, non-JSON-value, and alias regressions to assert warning plus body recovery instead of zero body records. This exception changes recovery only: invalid metadata must never influence ADR identity/status. Add a regression proving that a document without a closing delimiter returns the warning and derivation only, with no segments or evidence.
 
 - [ ] **Step 1: Add failing provenance, recovery, and exact-evidence tests**
 
@@ -4539,17 +4539,17 @@ def segment_markdown(
             None,
         )
         if closing is None:
-            warnings.append(
-                warning_record(
-                    source,
-                    code="unsupported_construct",
-                    message="invalid Markdown front matter: closing delimiter not found",
-                    span=SourceSpan(1, max(1, len(lines))),
-                    possible_role="status",
-                    derivation_ids=(derivation_id,),
-                )
+            warning = warning_record(
+                source,
+                code="unsupported_construct",
+                message="invalid Markdown front matter: closing delimiter not found",
+                span=SourceSpan(1, max(1, len(lines))),
+                possible_role="status",
+                derivation_ids=(derivation_id,),
             )
-            cursor = 1
+            return IngestionResult(
+                derivations=(derivation,), warnings=(warning,)
+            )
         else:
             cursor = closing + 1
             try:
