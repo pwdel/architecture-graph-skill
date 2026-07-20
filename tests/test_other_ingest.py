@@ -468,6 +468,84 @@ def test_structured_multiline_evidence_preserves_crlf_bytes() -> None:
     )
 
 
+@pytest.mark.parametrize("style", ["|", ">"], ids=["literal", "folded"])
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    "followed_by_sibling", [False, True], ids=["terminal", "followed"]
+)
+def test_yaml_block_scalar_evidence_excludes_its_final_line_terminator(
+    style: str, line_ending: str, followed_by_sibling: bool
+) -> None:
+    lines = [f"a: {style}", "  one", "  two"]
+    if followed_by_sibling:
+        lines.append("b: sibling")
+    item_source = source(
+        "architecture/block-scalar.yaml",
+        "yaml",
+        line_ending.join(lines) + line_ending,
+    )
+
+    result = segment_structured(item_source, CONTEXT)
+
+    by_pointer = {
+        item["metadata"]["json_pointer"]: item for item in result.segments
+    }
+    assert set(by_pointer) == ({"/a", "/b"} if followed_by_sibling else {"/a"})
+    assert result.warnings == ()
+    scalar = by_pointer["/a"]
+    assert scalar["span"] == {
+        "start_line": 1,
+        "end_line": 3,
+        "start_column": 4,
+        "end_column": 6,
+    }
+    item_evidence = next(
+        item for item in result.evidence if item["segment_id"] == scalar["id"]
+    )
+    assert item_evidence["text"] == line_ending.join(
+        [style, "  one", "  two"]
+    )
+    assert item_evidence["text"] == exact_source_excerpt(
+        item_source, SourceSpan(**item_evidence["span"])
+    )
+    if followed_by_sibling:
+        sibling = by_pointer["/b"]
+        sibling_evidence = next(
+            item
+            for item in result.evidence
+            if item["segment_id"] == sibling["id"]
+        )
+        assert sibling_evidence["text"] == "sibling"
+
+
+def test_yaml_scalar_span_accounts_for_a_utf8_bom() -> None:
+    item_source = source(
+        "architecture/bom.yaml", "yaml", "\ufeffa: value\n"
+    )
+
+    result = segment_structured(item_source, CONTEXT)
+
+    assert result.warnings == ()
+    scalar = next(
+        item
+        for item in result.segments
+        if item["metadata"]["json_pointer"] == "/a"
+    )
+    assert scalar["span"] == {
+        "start_line": 1,
+        "end_line": 1,
+        "start_column": 5,
+        "end_column": 10,
+    }
+    item_evidence = next(
+        item for item in result.evidence if item["segment_id"] == scalar["id"]
+    )
+    assert item_evidence["text"] == "value"
+    assert item_evidence["text"] == exact_source_excerpt(
+        item_source, SourceSpan(**item_evidence["span"])
+    )
+
+
 def test_oversized_structured_scalar_is_visible_and_skipped() -> None:
     bounded_context = IngestionContext(
         configuration_digest=CONTEXT.configuration_digest,

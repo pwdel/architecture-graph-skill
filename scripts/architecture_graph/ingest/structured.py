@@ -281,8 +281,37 @@ def _leaves(
     ]
 
 
+def _source_position(text: str, index: int) -> tuple[int, int]:
+    if not 0 <= index <= len(text):
+        raise ValueError("source mark index is out of bounds")
+    offset = 0
+    for line_number, raw in enumerate(text.splitlines(keepends=True), start=1):
+        if raw.endswith("\r\n"):
+            terminator_length = 2
+        elif raw.endswith(("\r", "\n")):
+            terminator_length = 1
+        else:
+            terminator_length = 0
+        content_end = offset + len(raw) - terminator_length
+        if offset <= index <= content_end:
+            return line_number, index - offset + 1
+        if index < offset + len(raw):
+            raise ValueError("source mark falls inside a line terminator")
+        offset += len(raw)
+    raise ValueError("source mark does not address a physical source line")
+
+
+def _without_final_line_terminator(text: str, end_index: int) -> int:
+    if text[:end_index].endswith("\r\n"):
+        return end_index - 2
+    if text[:end_index].endswith(("\r", "\n")):
+        return end_index - 1
+    return end_index
+
+
 def _node_span(source: SourceInput, node: ScalarNode) -> SourceSpan:
-    start_mark = node.start_mark
+    start_index = node.start_mark.index
+    end_index = node.end_mark.index
     if source.source_kind == "yaml":
         candidates = (
             token
@@ -293,12 +322,19 @@ def _node_span(source: SourceInput, node: ScalarNode) -> SourceSpan:
         )
         token = next(candidates, None)
         if token is not None:
-            start_mark = token.start_mark
+            start_index = token.start_mark.index
+            end_index = token.end_mark.index
+            if token.style in {"|", ">"} and token.end_mark.column == 0:
+                end_index = _without_final_line_terminator(
+                    source.text, end_index
+                )
+    start_line, start_column = _source_position(source.text, start_index)
+    end_line, end_column = _source_position(source.text, end_index)
     return SourceSpan(
-        start_mark.line + 1,
-        node.end_mark.line + 1,
-        start_mark.column + 1,
-        node.end_mark.column + 1,
+        start_line,
+        end_line,
+        start_column,
+        end_column,
     )
 
 
