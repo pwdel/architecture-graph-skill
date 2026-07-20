@@ -156,6 +156,37 @@ def test_dirty_content_and_pipeline_code_change_material_digest(
     assert material_input_digest(second_inputs, config, second_pipeline.digest) != second
 
 
+def test_material_input_digest_is_independent_of_caller_order(
+    architecture_repo: Path,
+) -> None:
+    from architecture_graph.sources import SourceInput
+
+    config = load_config(architecture_repo)
+    first = discover_sources(architecture_repo, config)[0]
+    second = SourceInput(
+        **{
+            **first.__dict__,
+            "relative_path": "docs/adr/ADR-002.md",
+            "absolute_path": architecture_repo / "docs" / "adr" / "ADR-002.md",
+        }
+    )
+    pipeline_digest = "sha256:" + ("a" * 64)
+
+    assert material_input_digest(
+        [first, second], config, pipeline_digest
+    ) == material_input_digest([second, first], config, pipeline_digest)
+
+
+def test_material_input_digest_rejects_duplicate_relative_paths(
+    architecture_repo: Path,
+) -> None:
+    config = load_config(architecture_repo)
+    item = discover_sources(architecture_repo, config)[0]
+
+    with pytest.raises(ValueError, match="duplicate source path"):
+        material_input_digest([item, item], config, "sha256:" + ("a" * 64))
+
+
 def test_source_revision_digest_uses_unique_content_hashes_only(
     architecture_repo: Path,
 ) -> None:

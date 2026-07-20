@@ -173,6 +173,10 @@ def source_record_id(item: SourceInput) -> str:
 def material_input_digest(
     inputs: Sequence[SourceInput], config: ProjectConfig, pipeline_digest: str
 ) -> str:
+    ordered_inputs = sorted(inputs, key=lambda item: item.relative_path)
+    for previous, current in zip(ordered_inputs, ordered_inputs[1:]):
+        if previous.relative_path == current.relative_path:
+            raise ValueError(f"duplicate source path: {current.relative_path}")
     payload = {
         "sources": [
             {
@@ -184,7 +188,7 @@ def material_input_digest(
                 "authority_basis": item.authority_basis,
                 "tracked": item.tracked,
             }
-            for item in inputs
+            for item in ordered_inputs
         ],
         "config": config.as_digest_input(),
         "pipeline_digest": pipeline_digest,
