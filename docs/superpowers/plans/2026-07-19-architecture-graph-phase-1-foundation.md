@@ -8422,6 +8422,9 @@ and its descriptor-relative `os.open`, plus a target-basename audit-event
 counter, require one target open during the first integrity pass and a second
 only for the deliberate rejection. The audit count catches opener aliases
 cached before monkeypatching, including descriptor-relative `os.open` calls.
+All target-leaf comparisons use Unicode `casefold()`. A cached `swapcase()`
+probe must add one audit event whether the filesystem accepts or rejects the
+case-variant open, then the matrix resets its counter before validation.
 
 The first executable line in `publish_snapshot()` is
 `_validated_observation(initial_observation)`; only then may it call
@@ -11474,7 +11477,8 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
         path = args[0]
         if (
             isinstance(path, (str, bytes, os.PathLike))
-            and Path(os.fsdecode(path)).name == target_name
+            and Path(os.fsdecode(path)).name.casefold()
+            == target_name.casefold()
         ):
             audit_target_opens += 1
 
@@ -11482,7 +11486,11 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
         self, components, flags, mode=0o600
     ):
         nonlocal target_storage_opens
-        if tuple(components)[-1:] == (target_name,):
+        if (
+            components
+            and os.fsdecode(components[-1]).casefold()
+            == target_name.casefold()
+        ):
             target_storage_opens += 1
         return real_open_regular(self, components, flags, mode)
 
@@ -11493,7 +11501,8 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
         if (
             dir_fd is not None
             and isinstance(path, (str, bytes, os.PathLike))
-            and Path(os.fsdecode(path)).name == target_name
+            and Path(os.fsdecode(path)).name.casefold()
+            == target_name.casefold()
         ):
             target_descriptor_opens += 1
         return real_os_open(path, flags, mode, dir_fd=dir_fd)
@@ -11519,6 +11528,9 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
     )
     monkeypatch.setattr(os, "open", count_target_descriptor_open)
     sys.addaudithook(count_target_audit_open)
+    case_probe_dir_fd = real_os_open(
+        snapshot_dir, os.O_RDONLY | os.O_DIRECTORY
+    )
 
     def exercise(storage: ProjectStorage | None) -> None:
         reader = SnapshotReader.open(
@@ -11544,6 +11556,21 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
 
     audit_active = True
     try:
+        case_probe_fd: int | None = None
+        try:
+            case_probe_fd = real_os_open(
+                target_name.swapcase(),
+                os.O_RDONLY,
+                dir_fd=case_probe_dir_fd,
+            )
+        except FileNotFoundError:
+            pass
+        finally:
+            if case_probe_fd is not None:
+                os.close(case_probe_fd)
+        assert audit_target_opens == 1
+        audit_target_opens = 0
+
         if borrowed:
             with ProjectStorage(project, create=False) as storage:
                 exercise(storage)
@@ -11551,6 +11578,7 @@ def test_validation_parses_the_image_acquired_before_an_atomic_swap(
             exercise(None)
     finally:
         audit_active = False
+        os.close(case_probe_dir_fd)
 
 
 @pytest.mark.parametrize("borrowed", [False, True])
@@ -12651,7 +12679,7 @@ The focused acceptance matrix must include:
 | Manifest-authoritative continuity | repeated configured-untracked and staged-add Git facts cannot promote unchanged paths during an unrelated deletion; genuine dirty additions remain candidates; an unchanged equal-byte local path retains continuity while the isolated new/old pair moves |
 | Project identity Git read | non-UTF-8 remote, executable failure, and non-optional Git failure become `RepositoryStateError`; normalized remote/project ID are captured in the stable token and a late remote change cannot fork history |
 | Memory storage boundary | direct in-repository roots, root redirects, redirected/file-valued project entries, and every reserved-component redirect or wrong type fail closed; file-valued and simulated unwritable roots return 2 with empty stdout, one diagnostic, and no pre-commit pointer mutation in human and JSON modes |
-| Anchored reader/open | borrowed and compatibility readers prove one target `open` audit event per integrity pass and survive atomic manifest/payload swaps only by parsing that image; monkeypatch and audit-hook guards reject extra anchored, descriptor-relative cached-alias, path/hash, absolute raw, and `FileIO` opens; substitution, lifecycle, FD, and FIFO cases remain covered |
+| Anchored reader/open | borrowed and compatibility readers prove one case-folded target `open` audit event per integrity pass and survive atomic manifest/payload swaps only by parsing that image; a case-variant cached-alias probe and monkeypatch/audit guards reject extra anchored, descriptor-relative, path/hash, absolute raw, and `FileIO` opens; substitution, lifecycle, FD, and FIFO cases remain covered |
 | Selected-state CAS | pointer-only same-snapshot observation winners conflict, and changing only the canonical selected observation row while keeping `current.json` byte-identical conflicts before the guard or durable publication |
 | Late repository guard | source mutation after real staging, immutable reuse validation, or complete ledger preparation fails with unchanged ledger/pointer and cleaned temporary state |
 | Reuse result preflight | source, segment, and warning counts all materialize before final validation or observation publication; an injected count `OSError` preserves ledger/pointer and CLI framing |
