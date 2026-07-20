@@ -375,6 +375,7 @@ git commit -m "feat: scaffold architecture graph skill"
 **Interfaces:**
 - Produces: `canonicalize(value: object) -> object`.
 - Produces: `canonical_dumps(value: object) -> str` and `canonical_bytes(value: object) -> bytes`.
+- Produces: `source_revision_digest(content_hashes: Iterable[str]) -> str`; its preimage is the sorted set of unique selected source content hashes.
 - Produces: `stable_id(kind: str, *parts: object) -> str`.
 - Produces: `content_digest(record: Mapping[str, object]) -> str`.
 - Produces: `finalize_record(record: Mapping[str, object]) -> dict[str, object]`.
@@ -516,7 +517,7 @@ Create `scripts/architecture_graph/canonical.py` with these public functions and
 ```python
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
 import hashlib
 import json
@@ -570,6 +571,10 @@ def canonical_bytes(value: object) -> bytes:
 
 def sha256_digest(value: bytes) -> str:
     return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+
+def source_revision_digest(content_hashes: Iterable[str]) -> str:
+    return sha256_digest(canonical_bytes(sorted(set(content_hashes))))
 
 
 def stable_id(kind: str, *parts: object) -> str:
@@ -995,7 +1000,7 @@ git commit -m "feat: add canonical record contracts"
 - Produces: `discover_sources(root: Path, config: ProjectConfig) -> list[SourceInput]`.
 - Produces: `source_record_base(input: SourceInput, logical_source_id: str) -> dict[str, object]`; records are finalized only after adapter provenance, parsed identifiers, rename resolution, and parse status are known.
 - Produces: `material_input_digest(inputs: Sequence[SourceInput], config: ProjectConfig, pipeline_digest: str) -> str`.
-- Produces: `source_revision_digest(inputs: Sequence[SourceInput]) -> str`; its versioned preimage contains only the sorted set of unique selected source content hashes.
+- Consumes: `canonical.source_revision_digest(content_hashes: Iterable[str]) -> str` from Task 2 so discovery, validation, and publication share one source-revision identity computation.
 - Task 10 binds canonical rename-resolution inputs into the snapshot `input_digest`; freshness remains a function of current source/configuration/pipeline material so a completed rename does not force a second rebuild.
 - A repeated explicit ADR/document ID is legal only when every occurrence has the same content hash. Exact byte copies share one logical-source identity; the same explicit ID on different bytes is an authoring error and fails before publication.
 
@@ -1044,7 +1049,11 @@ import subprocess
 
 import pytest
 
-from architecture_graph.canonical import canonical_bytes, sha256_digest
+from architecture_graph.canonical import (
+    canonical_bytes,
+    sha256_digest,
+    source_revision_digest,
+)
 from architecture_graph.config import configuration_digest, load_config
 from architecture_graph.fingerprint import pipeline_fingerprint
 from architecture_graph.project import ProjectPaths, normalize_remote
@@ -1196,10 +1205,10 @@ def test_dirty_content_and_pipeline_code_change_material_digest(
 def test_source_revision_digest_uses_unique_content_hashes_only(
     architecture_repo: Path,
 ) -> None:
-    from architecture_graph.sources import SourceInput, source_revision_digest
+    from architecture_graph.sources import SourceInput
 
     inputs = discover_sources(architecture_repo, load_config(architecture_repo))
-    assert source_revision_digest(inputs) == sha256_digest(
+    assert source_revision_digest(item.content_hash for item in inputs) == sha256_digest(
         canonical_bytes(sorted({item.content_hash for item in inputs}))
     )
     duplicate = SourceInput(
@@ -1209,14 +1218,18 @@ def test_source_revision_digest_uses_unique_content_hashes_only(
             "absolute_path": architecture_repo / "docs" / "adr" / "copy.md",
         }
     )
-    assert source_revision_digest([*inputs, duplicate]) == source_revision_digest(inputs)
+    assert source_revision_digest(
+        item.content_hash for item in [*inputs, duplicate]
+    ) == source_revision_digest(item.content_hash for item in inputs)
     changed = SourceInput(
         **{
             **inputs[0].__dict__,
             "content_hash": "sha256:" + ("f" * 64),
         }
     )
-    assert source_revision_digest([changed]) != source_revision_digest(inputs)
+    assert source_revision_digest(
+        item.content_hash for item in [changed]
+    ) != source_revision_digest(item.content_hash for item in inputs)
 
 
 def test_memory_root_precedence(architecture_repo: Path, tmp_path: Path, monkeypatch) -> None:
@@ -1916,11 +1929,6 @@ def material_input_digest(
         "pipeline_digest": pipeline_digest,
     }
     return sha256_digest(canonical_bytes(payload))
-
-
-def source_revision_digest(inputs: Sequence[SourceInput]) -> str:
-    unique_content_hashes = sorted({item.content_hash for item in inputs})
-    return sha256_digest(canonical_bytes(unique_content_hashes))
 ```
 
 `git_blob` is the repository's Git-object hash of the exact working-tree bytes already read into `raw`, not the potentially stale index entry at `:path`. It is therefore a deterministic function of the selected bytes under the repository's object format. Staging unchanged working bytes cannot make a reused snapshot's source provenance stale.
@@ -2267,7 +2275,7 @@ git commit -m "feat: add atomic JSONL storage"
 - Produces: `SnapshotReader.open(project: ProjectPaths, snapshot_id: str | None = None) -> SnapshotReader`.
 - Produces: `publish_snapshot(project: ProjectPaths, bundle: SnapshotBundle, observation: Mapping[str, JSONValue], expected_current_snapshot_id: str | None) -> PublishedSnapshot`.
 - Produces: `observe_existing_snapshot(project, reader, observation, expected_current_snapshot_id) -> PublishedSnapshot` without rebuilding payloads.
-- Requires `source_revision_digest` on every bundle and persists it in both `manifest.json` and every observation record so later history reduction does not require a schema migration.
+- Requires `source_revision_digest` on every bundle and persists it in both `manifest.json` and every observation record so later history reduction does not require a schema migration. `SnapshotFinalizer.validate()` and the publication boundary independently recompute it with the Task 2 canonical helper from finalized, deduplicated, normalized source records.
 - Restricts the Phase 1 writer to deterministic bundles with no layered parent fields. The reader recognizes layered IDs for forward compatibility; Phase 2 supplies enriched/reviewed kind-specific publication validators.
 - Persists the exact runtime, dependency-version, and implementation-file fingerprint preimage in `manifest.json` and verifies that it hashes to `deterministic_pipeline_digest`.
 
@@ -2280,11 +2288,16 @@ from pathlib import Path
 
 import pytest
 
-from architecture_graph.canonical import canonical_bytes, sha256_digest
+from architecture_graph.canonical import (
+    canonical_bytes,
+    sha256_digest,
+    source_revision_digest,
+)
 from architecture_graph.project import ProjectPaths
 from architecture_graph.records import finalize_record
 from architecture_graph.snapshot import (
     SnapshotBundle,
+    SnapshotFinalizer,
     SnapshotReader,
     observe_existing_snapshot,
     publish_snapshot,
@@ -2306,7 +2319,7 @@ PIPELINE_DIGEST = sha256_digest(canonical_bytes(PIPELINE_PREIMAGE))
 CONTENT_DIGEST = "sha256:" + "c" * 64
 EMPTY_REVIEWS_DIGEST = "sha256:" + "d" * 64
 MATERIAL_DIGEST = "sha256:" + "e" * 64
-SOURCE_REVISION_DIGEST = "sha256:" + "9" * 64
+SOURCE_REVISION_DIGEST = source_revision_digest([CONTENT_DIGEST])
 INPUT_DIGEST = "sha256:" + "f" * 64
 
 
@@ -2494,13 +2507,34 @@ def test_phase1_writer_rejects_layered_kinds_and_fingerprint_mismatch(
             project, mismatched, observation("2026-07-19T10:00:00Z"), None
         )
 
-    invalid_revision = SnapshotBundle(
-        **{**bundle().__dict__, "source_revision_digest": "sha256:short"}
+
+
+def test_false_source_revision_fails_validation_and_publication_without_pointer_change(
+    architecture_repo: Path, tmp_path: Path
+) -> None:
+    project = ProjectPaths.resolve(architecture_repo, tmp_path / "memory")
+    published = publish_snapshot(
+        project, bundle(), observation("2026-07-19T10:00:00Z"), None
     )
-    with pytest.raises(ValueError, match="source_revision_digest"):
+    current_before = project.current_path.read_bytes()
+    wrong_digest = "sha256:" + ("8" * 64)
+    assert wrong_digest != SOURCE_REVISION_DIGEST
+    invalid = SnapshotBundle(
+        **{**bundle().__dict__, "source_revision_digest": wrong_digest}
+    )
+
+    with pytest.raises(ValueError, match="source revision digest mismatch"):
+        SnapshotFinalizer(project, invalid).validate()
+    with pytest.raises(ValueError, match="source revision digest mismatch"):
         publish_snapshot(
-            project, invalid_revision, observation("2026-07-19T10:00:00Z"), None
+            project,
+            invalid,
+            observation("2026-07-19T11:00:00Z"),
+            published.snapshot_id,
         )
+
+    assert project.current_path.read_bytes() == current_before
+    assert SnapshotReader.open(project).snapshot_id == published.snapshot_id
 
 
 def test_exact_duplicate_is_deduplicated_but_conflict_is_rejected(
@@ -2644,6 +2678,7 @@ from architecture_graph.canonical import (
     atomic_write_json,
     canonical_bytes,
     sha256_digest,
+    source_revision_digest,
     stable_id,
 )
 from architecture_graph.jsonl_store import (
@@ -2783,6 +2818,7 @@ class SnapshotFinalizer:
             )
             for record_type in RECORD_TYPES
         }
+        _validate_source_revision(self.bundle, normalized)
         _validate_references(normalized)
 
     def publish(
@@ -2919,6 +2955,21 @@ def _deduplicate(record_type: str, records: Sequence[Record]) -> list[Record]:
     return [by_id[record_id] for record_id in sorted(by_id)]
 
 
+def _validate_source_revision(
+    bundle: SnapshotBundle,
+    records_by_type: Mapping[str, Sequence[Record]],
+) -> None:
+    expected = source_revision_digest(
+        str(record["content_hash"])
+        for record in records_by_type.get("sources", ())
+    )
+    if bundle.source_revision_digest != expected:
+        raise ValueError(
+            "source revision digest mismatch: "
+            f"expected {expected}, got {bundle.source_revision_digest}"
+        )
+
+
 def _validate_references(records_by_type: Mapping[str, Sequence[Record]]) -> None:
     ids = {
         str(record["id"])
@@ -3005,6 +3056,7 @@ def _write_stage(
             )
             for record_type in RECORD_TYPES
         }
+        _validate_source_revision(bundle, normalized)
         _validate_references(normalized)
         for record_type, records in normalized.items():
             path = staging / f"{record_type}.jsonl"
@@ -6270,7 +6322,12 @@ from pathlib import Path
 import subprocess
 from collections.abc import Mapping, Sequence
 
-from architecture_graph.canonical import canonical_bytes, sha256_digest, stable_id
+from architecture_graph.canonical import (
+    canonical_bytes,
+    sha256_digest,
+    source_revision_digest,
+    stable_id,
+)
 from architecture_graph import __version__
 from architecture_graph.config import configuration_digest, load_config
 from architecture_graph.fingerprint import pipeline_fingerprint
@@ -6292,7 +6349,6 @@ from architecture_graph.sources import (
     SourceInput,
     discover_sources,
     material_input_digest,
-    source_revision_digest,
     source_record_id,
     source_record_base,
 )
@@ -6821,7 +6877,7 @@ def index_repository(
         config_digest, pipeline_digest, __version__, config.max_segment_chars
     )
     material_digest = material_input_digest(inputs, config, pipeline_digest)
-    revision_digest = source_revision_digest(inputs)
+    revision_digest = source_revision_digest(item.content_hash for item in inputs)
     current = _current_reader(project)
     expected_current = None if current is None else current.snapshot_id
     analysis_parent_id = _analysis_parent_snapshot_id(current)
