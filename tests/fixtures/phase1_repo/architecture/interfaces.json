@@ -1,0 +1,1 @@
+{"events":{"OrderPlaced":{"publisher":"checkout","retention_days":30}}}

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import re
 
 from architecture_graph.records import Record
+from architecture_graph.sources import SourceInput
 
 
 @dataclass(frozen=True)
@@ -44,3 +46,43 @@ class IngestionResult:
             derivations=(*self.derivations, *other.derivations),
             warnings=(*self.warnings, *other.warnings),
         )
+
+
+def ingest_source(
+    source: SourceInput, context: IngestionContext
+) -> IngestionResult:
+    if source.source_kind == "markdown":
+        from architecture_graph.ingest.markdown import segment_markdown
+
+        return segment_markdown(source, context)
+    if source.source_kind in {"mermaid", "plantuml"}:
+        from architecture_graph.ingest.diagrams import segment_diagram
+
+        return segment_diagram(source, context)
+    if source.source_kind in {"yaml", "json"}:
+        from architecture_graph.ingest.structured import segment_structured
+
+        return segment_structured(source, context)
+    if source.source_kind == "text":
+        from architecture_graph.ingest.plaintext import segment_plaintext
+
+        return segment_plaintext(source, context)
+    raise ValueError(f"no ingestion adapter for {source.source_kind}")
+
+
+def ingest_sources(
+    sources: Sequence[SourceInput], context: IngestionContext
+) -> IngestionResult:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for source in sources:
+        if source.relative_path in seen:
+            duplicates.add(source.relative_path)
+        seen.add(source.relative_path)
+    if duplicates:
+        raise ValueError(f"duplicate source path: {sorted(duplicates)[0]}")
+
+    result = IngestionResult()
+    for source in sorted(sources, key=lambda item: item.relative_path):
+        result = result.merge(ingest_source(source, context))
+    return result

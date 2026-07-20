@@ -1,0 +1,4 @@
+Checkout owns the order lifecycle.
+It publishes OrderPlaced after payment authorization.
+
+Warehouse consumes OrderPlaced idempotently.

@@ -1,0 +1,4 @@
+services:
+  checkout:
+    database: orders
+    owner: commerce
