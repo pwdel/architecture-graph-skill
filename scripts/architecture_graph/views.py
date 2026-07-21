@@ -35,5 +35,9 @@ def summarize_record(
     if rankings is not None:
         ranking = rankings.get(str(record["id"]))
         if ranking is not None:
-            summary["scores"] = ranking.get("scores", {})
+            scores = ranking.get("scores", {})
+            summary["scores"] = {name: payload.get("score", 0) for name, payload in scores.items()}
+            navigation = scores.get("navigation", {})
+            features = navigation.get("features", {}) if isinstance(navigation, dict) else {}
+            summary["navigation_components"] = {name: features[name] for name in ("pagerank", "lexical_salience") if name in features}
     return summary

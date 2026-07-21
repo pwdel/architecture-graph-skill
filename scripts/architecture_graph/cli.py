@@ -260,7 +260,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report = build_report(reader, limits=ReportLimits(max_chars=args.max_chars))
                 if as_json:
                     assertions = [{key: value for key, value in item.items() if key != "evidence_ids"} for item in report.assertions]
-                    print(canonical_dumps({"coverage": report.coverage, "assertions": assertions, "text": render_report_text(report)}))
+                    payload = {"coverage": report.coverage, "assertions": assertions}
+                    while len(canonical_dumps(payload)) + 1 > args.max_chars and assertions:
+                        assertions.pop()
+                    if len(canonical_dumps(payload)) + 1 > args.max_chars:
+                        raise ValueError("report max_chars is too small for coverage metadata")
+                    print(canonical_dumps(payload))
                 else:
                     sys.stdout.write(render_report_text(report))
                 return 0

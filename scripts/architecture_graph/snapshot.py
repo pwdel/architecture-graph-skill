@@ -43,7 +43,8 @@ from architecture_graph.schemas import validate_snapshot_references, validate_ty
 SNAPSHOT_ID = re.compile(r"^(deterministic|enriched|reviewed):([0-9a-f]{64})$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 EXPECTED_SCHEMA_VERSIONS = {"snapshot": 1, "records": 1}
-PHASE2_SCHEMA_VERSIONS = {"snapshot": 1, "records": 1, "semantic": 1}
+PHASE2_SCHEMA_VERSIONS = {"snapshot": 1, "records": 1, "semantic": 2}
+LEGACY_PHASE2_SCHEMA_VERSIONS = {"snapshot": 1, "records": 1, "semantic": 1}
 EXPECTED_PAYLOAD_FILES = frozenset(
     {f"{record_type}.jsonl" for record_type in RECORD_TYPES} | {"report.md"}
 )
@@ -427,7 +428,7 @@ def _validate_schema_versions(value: object) -> None:
         for key, version in value.items()
     ):
         raise ValueError("schema_versions must be a positive integer map")
-    if dict(value) not in (EXPECTED_SCHEMA_VERSIONS, PHASE2_SCHEMA_VERSIONS):
+    if dict(value) not in (EXPECTED_SCHEMA_VERSIONS, LEGACY_PHASE2_SCHEMA_VERSIONS, PHASE2_SCHEMA_VERSIONS):
         raise ValueError(
             "schema_versions must identify supported snapshot, records, and semantic schemas"
         )
@@ -524,7 +525,7 @@ def _normalize_and_validate_bundle(
         normalized[record_type] = _deduplicate(record_type, raw_records)
     _validate_source_revision(bundle.source_revision_digest, normalized)
     _validate_references(normalized)
-    if bundle.schema_versions.get("semantic") == 1:
+    if bundle.schema_versions.get("semantic") in {1, 2}:
         typed_issues = [
             issue
             for records in normalized.values()

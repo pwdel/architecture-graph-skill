@@ -4,6 +4,7 @@ from architecture_graph.semantic_queries import decisions_query, evidence_query,
 from architecture_graph.snapshot import SnapshotReader
 from architecture_graph.paging import page_records
 from architecture_graph.views import summarize_record
+from architecture_graph.query import render_query_envelope
 from conftest import ignore_architecture_graph
 
 
@@ -59,3 +60,9 @@ def test_term_summary_bounds_large_evidence_collections() -> None:
     assert summary["evidence_count"] == 2_000
     assert summary["top_evidence_ids"] == ["evidence:0000", "evidence:0001"]
     assert "evidence_ids" not in summary
+
+
+def test_semantic_coverage_is_included_in_character_budget(phase1_repository) -> None:
+    reader = _reader(phase1_repository)
+    page = terms_query(reader, limit=20, max_chars=1_500)
+    assert len(render_query_envelope(page, "json")) <= 1_500

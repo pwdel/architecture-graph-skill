@@ -56,4 +56,17 @@ def collect_decision_candidates(parsed: ParsedCorpus, catalog: RecordCatalog) ->
         derivations.append(derivation)
         status = field_roles.get("status", "unknown").casefold()
         candidates.append(DecisionCandidate(candidate_id, "structured_parent", field_roles, field_evidence, tuple(token for token in parent.split("/") if token), status, provenance[(source_id, parent)], evidence_ids, (str(derivation["id"]),)))
+    for claim in catalog.iter("claim"):
+        scope = tuple(str(value) for value in (claim.get("qualifiers") or {}).get("scope", []))
+        if not any(value.casefold() in {"decision", "decisions", "architecture decision"} for value in scope):
+            continue
+        statement = f"{claim['subject']['surface']} {claim['predicate']} {claim['object']['surface']}"
+        evidence_ids = tuple(str(value) for value in claim.get("evidence_ids", []))
+        candidate_id = stable_id("decision-candidate", claim["id"], statement)
+        derivation = build_analysis_derivation("claim_decision_candidate", (str(claim["id"]),), "decision_candidate", candidate_id)
+        derivations.append(derivation)
+        evidence = catalog.get(evidence_ids[0])
+        source = catalog.get(str(evidence["source_version_id"]))
+        status = str((source.get("adr_metadata") or {}).get("status", "unknown")).casefold()
+        candidates.append(DecisionCandidate(candidate_id, "decision_heading", {"decision": statement, "title": statement}, {"decision": evidence_ids}, scope, status, str(claim.get("parser_provenance", "qualified_claim")), evidence_ids, (str(derivation["id"]),), (str(claim["id"]),)))
     return DecisionCandidateResult(tuple(candidates), tuple(warnings), tuple(sorted(derivations, key=lambda item: str(item["id"]))))

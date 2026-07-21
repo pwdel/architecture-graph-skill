@@ -85,6 +85,7 @@ class DecisionCandidate:
     parser_provenance: str
     evidence_ids: tuple[str, ...]
     derivation_ids: tuple[str, ...]
+    claim_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

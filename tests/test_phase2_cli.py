@@ -26,6 +26,8 @@ def test_report_cli_honors_character_ceiling(phase1_repository, capsys) -> None:
     index_corpus([phase1_repository])
     assert main(["report", str(phase1_repository), "--max-chars", "3000"]) == 0
     assert len(capsys.readouterr().out) <= 3_000
+    assert main(["report", str(phase1_repository), "--max-chars", "1500", "--json"]) == 0
+    assert len(capsys.readouterr().out) <= 1_500
 
 
 def test_oversized_compact_record_has_typed_cli_error(phase1_repository, capsys) -> None:

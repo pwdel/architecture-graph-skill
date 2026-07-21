@@ -868,7 +868,7 @@ def index_repository(
     bundle = SnapshotBundle(
         snapshot_kind="deterministic",
         configuration_digest=config_digest,
-        schema_versions={"snapshot": 1, "records": 1, "semantic": 1},
+        schema_versions={"snapshot": 1, "records": 1, "semantic": 2},
         frozen_review_set_digest=sha256_digest(b""),
         material_input_digest=material_digest,
         source_revision_digest=revision_digest,
