@@ -48,7 +48,13 @@ def neighbors_query(reader: SnapshotReader, *, node_id: str, depth: int = 1, fie
 
 def evidence_query(reader: SnapshotReader, *, record_id: str, fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
     catalog = _catalog(reader)
-    record = catalog.get(record_id)
+    record = catalog.maybe_get(record_id)
+    if record is None and record_id.startswith("assertion:"):
+        from architecture_graph.report import ReportLimits, build_report
+        report = build_report(reader, limits=ReportLimits(max_chars=1_000_000))
+        record = next((item for item in report.assertions if item["id"] == record_id), None)
+    if record is None:
+        raise KeyError(record_id)
     evidence_ids = list(record.get("evidence_ids", []))
     records = [dict(catalog.get(str(item))) for item in evidence_ids]
     return page_records(records, binding={"snapshot_id": reader.snapshot_id, "command": "evidence", "record_id": record_id, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)

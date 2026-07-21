@@ -255,9 +255,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             project = _select_project(args.root, args.corpus, args.memory_root)
             reader = SnapshotReader.open(project, args.snapshot)
             if args.command == "report":
-                report = build_report(reader, limits=ReportLimits.defaults())
+                report = build_report(reader, limits=ReportLimits(max_chars=args.max_chars))
                 if as_json:
-                    print(canonical_dumps({"assertions": list(report.assertions), "text": render_report_text(report)}))
+                    assertions = [{key: value for key, value in item.items() if key != "evidence_ids"} for item in report.assertions]
+                    print(canonical_dumps({"assertions": assertions, "text": render_report_text(report)}))
                 else:
                     sys.stdout.write(render_report_text(report))
                 return 0
