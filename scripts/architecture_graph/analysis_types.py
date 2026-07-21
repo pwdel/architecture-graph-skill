@@ -75,6 +75,19 @@ class ClaimArgument:
 
 
 @dataclass(frozen=True)
+class DecisionCandidate:
+    candidate_id: str
+    anchor_kind: str
+    field_roles: Mapping[str, str]
+    field_evidence_ids: Mapping[str, tuple[str, ...]]
+    scope: tuple[str, ...]
+    status: str
+    parser_provenance: str
+    evidence_ids: tuple[str, ...]
+    derivation_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RecordCatalog:
     _records: Mapping[str, Record]
 
