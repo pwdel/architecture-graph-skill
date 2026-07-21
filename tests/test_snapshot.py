@@ -125,6 +125,15 @@ def test_snapshot_validation_rejects_invalid_semantic_record(tmp_path: Path) -> 
         SnapshotFinalizer(project, invalid).validate()
 
 
+@pytest.mark.parametrize("evidence_ids", ["evidence:missing", ["evidence:missing"]])
+def test_snapshot_validation_rejects_malformed_or_dangling_semantic_references(tmp_path: Path, evidence_ids) -> None:
+    term = finalize_record({"id": "term:broken", "kind": "term", "canonical_form": "broken", "observed_forms": ["broken"], "term_kind": "noun_phrase", "distinct_source_count": 1, "document_frequency": 1, "tfidf": 1.0, "discovery_signals": ["tfidf"], "evidence_ids": evidence_ids, "derivation_ids": ["derivation:source-manifest"]})
+    invalid = changed_bundle(bundle(), schema_versions={"snapshot": 1, "records": 1, "semantic": 1}, records_by_type={**bundle().records_by_type, "terms": [term]})
+    project = ProjectPaths.resolve(tmp_path, tmp_path / "memory")
+    with pytest.raises(ValueError, match="semantic snapshot validation failed"):
+        SnapshotFinalizer(project, invalid).validate()
+
+
 def reidentify_snapshot(
     snapshot_dir: Path, manifest: dict[str, object]
 ) -> tuple[str, Path]:

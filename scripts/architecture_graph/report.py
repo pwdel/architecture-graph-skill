@@ -57,7 +57,7 @@ def build_catalog_report(catalog: RecordCatalog, *, limits: ReportLimits) -> str
     nodes = {str(x["id"]): x for kind in ("term", "entity", "claim", "decision") for x in catalog.iter(kind)}
     navigation_ids = sorted(rankings, key=lambda node_id: (-float(rankings[node_id]["scores"]["navigation"]["score"]), node_id))[:limits.section_items]
     navigation = tuple(nodes[node_id] for node_id in navigation_ids if node_id in nodes and nodes[node_id].get("evidence_ids"))
-    decisions = tuple(sorted(catalog.iter("decision"), key=lambda x: str(x["id"])))[:limits.section_items]
+    decisions = tuple(sorted(catalog.iter("decision"), key=lambda x: (-float((rankings.get(str(x["id"]), {}).get("scores", {}).get("criticality") or {}).get("score", 0)), str(x["id"]))))[:limits.section_items]
     review = tuple(item for item in decisions if "missing_rationale" in item.get("diagnostic_codes", []))
     terms = tuple(sorted(catalog.iter("term"), key=lambda x: (-float(x["tfidf"]), str(x["id"]))))[:limits.section_items]
     sections = _hydrate_sections((navigation, decisions, review, terms), evidence)
@@ -76,7 +76,13 @@ def render_report_text(result: ReportResult) -> str:
         for item in items:
             label = item.get("title") or item.get("name") or item.get("canonical_form") or item.get("id")
             citations = item.get("citations", [])
-            citation = "; ".join(f"{x['path']}:{x['span']['start_line']}" for x in citations) if citations else ", ".join(str(x) for x in item.get("evidence_ids", []))
+            citation = "; ".join(_render_citation(x) for x in citations) if citations else ", ".join(str(x) for x in item.get("evidence_ids", []))
             lines.append(f"- {label} [{citation}]")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_citation(citation: Record) -> str:
+    span = citation["span"]
+    end_column = "?" if span.get("end_column") is None else span["end_column"]
+    return f"{citation['evidence_id']} {citation['path']}:{span['start_line']}:{span['start_column']}-{span['end_line']}:{end_column}"
