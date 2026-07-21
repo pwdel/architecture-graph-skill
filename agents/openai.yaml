@@ -1,4 +1,4 @@
 interface:
   display_name: "Architecture Graph"
-  short_description: "Index and query architecture evidence"
-  default_prompt: "Use $architecture-graph to index selected architecture files and return bounded, source-backed evidence."
+  short_description: "Build and query architecture evidence graphs"
+  default_prompt: "Use $architecture-graph capabilities first, then index selected architecture files and traverse bounded, source-backed terms, graph neighbors, decisions, and explanations."

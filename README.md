@@ -8,7 +8,7 @@ The core idea is defensive: expose the decisions, constraints, missing rationale
 
 ## What It Does Today
 
-The current implementation is Phase 1 foundation work. It can:
+The current implementation includes Phase 1 indexing and Phase 2 deterministic analysis. It can:
 
 - discover architecture sources from a repository
 - ingest Markdown ADRs and architecture notes
@@ -21,17 +21,30 @@ The current implementation is Phase 1 foundation work. It can:
 - accept one file, one directory, a repository, or several same-repository paths
 - keep separate corpus snapshots under project-local ignored memory
 - inspect freshness and query indexed records with bounded output
+- discover architecture vocabulary with sparse TF-IDF and glossary signals
+- extract qualified claims from prose, Mermaid, and PlantUML
+- build and traverse a typed evidence graph
+- rank navigation, criticality, review priority, and extraction confidence independently
+- reduce source-anchored decisions and render evidence-linked reports
 
-The Phase 1 command surface is:
+The command surface is:
 
 ```bash
 architecture-graph memory status PATH [PATH ...] --json
 architecture-graph index PATH [PATH ...] --json
 architecture-graph find segments --repo ROOT --corpus CORPUS_ID --json
 architecture-graph get sources SOURCE_ID --repo ROOT --corpus CORPUS_ID --json
+architecture-graph capabilities --json
+architecture-graph terms ROOT --corpus CORPUS_ID --json
+architecture-graph neighbors ROOT --corpus CORPUS_ID --node NODE_ID --depth 2 --json
+architecture-graph decisions ROOT --corpus CORPUS_ID --score criticality --json
+architecture-graph evidence ROOT --corpus CORPUS_ID --for RECORD_ID --json
+architecture-graph explain ROOT --corpus CORPUS_ID --id RECORD_ID --json
+architecture-graph report ROOT --corpus CORPUS_ID
 ```
 
-Phase 2 is planned to add term discovery, SVO-style deterministic relation extraction, claim and decision reduction, graph ranking, engineer reports, context packs, and semantic diffs.
+Phase 2 does not interpret raster images and does not include review mutation,
+decision lineage, or semantic snapshot diff.
 
 ## Why This Exists
 
@@ -53,11 +66,10 @@ The intended architecture pipeline is:
 2. Discover important terms with traditional NLP such as TF-IDF, headings, glossary signals, acronyms, and repeated architectural nouns.
 3. Extract deterministic subject-verb-object and diagram relations with rule-based parsers.
 4. Normalize relations into claims with modality, polarity, scope, status, and provenance.
-5. Reduce claims into candidate architecture decisions.
-6. Build typed graphs over decisions, claims, terms, entities, evidence, and source records.
-7. Rank decisions with explainable features, including authority, evidence breadth, modality, scope, graph centrality, churn, and review priority.
+5. Build typed graphs over claims, terms, entities, evidence, and source records.
+6. Rank graph navigation with explainable structural and lexical features.
+7. Reduce claims into candidate architecture decisions and rank consequence, review priority, and extraction confidence independently.
 8. Produce human-readable engineer reports that cite source evidence and raise focused questions for architects.
-9. Compare snapshots over time so architecture memory can evolve with Git history.
 
 The ranking model is deliberately not just "important nouns with many edges." Terms help find architecture vocabulary. Claims and decisions are the primary units of review.
 
@@ -157,14 +169,6 @@ uv run architecture-graph index tests/fixtures/phase1_repo --json
 
 ## Current Status
 
-The repo has working Phase 1 indexing and snapshot foundations. The next major implementation phase is deterministic analysis:
-
-- term discovery
-- deterministic relation extraction
-- modality, scope, status, and provenance tagging
-- claim and decision ledgers
-- graph ranking of decisions
-- engineer-readable reports
-- snapshot diffing across architecture revisions
-
-The design principle is stable: deterministic scripts first, LLM agents second, with provenance recorded at the field and record level.
+Version 0.3.0 provides deterministic prose-first evidence graphs. JSON and YAML
+contribute structure but are optional. The next increments may add human review
+and semantic history; image interpretation remains outside the current scope.

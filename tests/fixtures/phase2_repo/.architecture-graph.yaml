@@ -1,0 +1,7 @@
+schema_version: 1
+plaintext:
+  - architecture/notes.txt
+source_roles:
+  "architecture/ADR-*.md": adr
+source_authorities:
+  "architecture/ADR-*.md": accepted_adr_or_active_standard

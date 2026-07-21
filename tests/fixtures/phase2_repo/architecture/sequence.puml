@@ -1,0 +1,4 @@
+@startuml
+Frontend -> Gateway : calls Gateway
+Gateway -> Checkout : calls Checkout
+@enduml
