@@ -1,0 +1,5 @@
+services:
+  gateway:
+    routes_to: checkout
+  checkout:
+    store: orders

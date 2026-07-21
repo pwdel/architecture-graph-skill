@@ -1,0 +1,1 @@
+{"schema_version":1,"canonical_predicates":{"depends_on":["depend on","depends on","requires","uses"],"publishes":["emit","emits","publish","publishes"],"routes_to":["calls","routes to","sends to"],"stores_in":["persist in","persists in","store in","stores in"],"must_use":["must use","shall use"],"must_not_use":["must not use","shall not use"],"encrypts":["encrypt","encrypts"]}}

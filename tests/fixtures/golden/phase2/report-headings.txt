@@ -1,0 +1,6 @@
+# Architecture Graph Report
+## Coverage
+## Navigation hubs
+## Critical decisions and constraints
+## Review priorities
+## Glossary candidates

@@ -9,6 +9,7 @@ import sys
 
 from architecture_graph import __version__
 from architecture_graph.canonical import canonical_dumps
+from architecture_graph.capabilities import capability_record
 from architecture_graph.corpus import CorpusSelection, MemoryNotIgnoredError
 from architecture_graph.config import ConfigurationPathError
 from architecture_graph.errors import ArchitectureGraphError
@@ -20,6 +21,8 @@ from architecture_graph.query import (
     memory_status,
     render_query_envelope,
 )
+from architecture_graph.report import ReportLimits, build_report, render_report_text
+from architecture_graph.semantic_queries import decisions_query, evidence_query, explain_query, neighbors_query, terms_query
 from architecture_graph.records import RECORD_KIND_BY_TYPE
 from architecture_graph.snapshot import SnapshotReader
 
@@ -28,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="architecture-graph")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command")
+
+    capabilities = commands.add_parser(
+        "capabilities", help="show implemented phases and commands"
+    )
+    capabilities.add_argument("--json", action="store_true")
 
     index = commands.add_parser("index", help="build a deterministic snapshot")
     index.add_argument("paths", type=Path, nargs="+")
@@ -59,6 +67,24 @@ def build_parser() -> argparse.ArgumentParser:
     find.add_argument("--limit", type=int, default=20)
     find.add_argument("--cursor")
     find.add_argument("--jmespath")
+
+    for name in ("terms", "neighbors", "decisions", "evidence", "explain", "report"):
+        command = commands.add_parser(name)
+        command.add_argument("root", type=Path)
+        command.add_argument("--memory-root", type=Path)
+        command.add_argument("--corpus")
+        command.add_argument("--snapshot")
+        command.add_argument("--max-chars", type=int, default=12_000)
+        command.add_argument("--json", action="store_true")
+        if name != "report":
+            command.add_argument("--fields")
+            command.add_argument("--limit", type=int, default=20)
+            command.add_argument("--cursor")
+    commands.choices["neighbors"].add_argument("--node", required=True)
+    commands.choices["neighbors"].add_argument("--depth", type=int, default=1)
+    commands.choices["decisions"].add_argument("--score", choices=("navigation", "criticality", "review_priority", "extraction_confidence"), default="navigation")
+    commands.choices["evidence"].add_argument("--for", dest="record_id", required=True)
+    commands.choices["explain"].add_argument("--id", dest="record_id", required=True)
     return parser
 
 
@@ -191,6 +217,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     as_json = bool(getattr(args, "json", False))
     try:
+        if args.command == "capabilities":
+            payload = capability_record()
+            if as_json:
+                print(canonical_dumps(payload))
+            else:
+                print("Architecture Graph phase1, phase2")
+                print("Commands: " + ", ".join(payload["commands"]))
+            return 0
         if args.command == "index":
             result = index_corpus(
                 args.paths,
@@ -215,6 +249,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fields=_fields(args.fields),
                 max_chars=args.max_chars,
             )
+            sys.stdout.write(render_query_envelope(result, "json" if as_json else "markdown"))
+            return 0
+        if args.command in {"terms", "neighbors", "decisions", "evidence", "explain", "report"}:
+            project = _select_project(args.root, args.corpus, args.memory_root)
+            reader = SnapshotReader.open(project, args.snapshot)
+            if args.command == "report":
+                report = build_report(reader, limits=ReportLimits.defaults())
+                if as_json:
+                    print(canonical_dumps({"assertions": list(report.assertions), "text": render_report_text(report)}))
+                else:
+                    sys.stdout.write(render_report_text(report))
+                return 0
+            common = {"fields": _fields(args.fields), "limit": args.limit, "max_chars": args.max_chars, "cursor": args.cursor}
+            if args.command == "terms": result = terms_query(reader, **common)
+            elif args.command == "neighbors": result = neighbors_query(reader, node_id=args.node, depth=args.depth, **common)
+            elif args.command == "decisions": result = decisions_query(reader, score=args.score, **common)
+            elif args.command == "evidence": result = evidence_query(reader, record_id=args.record_id, **common)
+            else: result = explain_query(reader, record_id=args.record_id, **common)
             sys.stdout.write(render_query_envelope(result, "json" if as_json else "markdown"))
             return 0
         project = _select_project(args.repo, args.corpus, args.memory_root)

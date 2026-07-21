@@ -1,0 +1,2 @@
+Gateway routes to Checkout.
+Gateway must not route to LegacyCheckout.
