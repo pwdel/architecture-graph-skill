@@ -89,24 +89,47 @@ def _read_source(root: Path, relative_path: str, tracked: bool) -> SourceInput:
     )
 
 
-def discover_sources(root: Path, config: ProjectConfig) -> list[SourceInput]:
+def _inside_selection(path: str, selected: str) -> bool:
+    return selected == "." or path == selected or path.startswith(selected + "/")
+
+
+def discover_sources(
+    root: Path,
+    config: ProjectConfig,
+    selected_paths: Sequence[str] = (".",),
+) -> list[SourceInput]:
     tracked = sorted(
         item.decode("utf-8")
         for item in _git_bytes(root, "ls-files", "-z").split(b"\0")
         if item
     )
     tracked_set = set(tracked)
+    explicit_files = {
+        value
+        for value in selected_paths
+        if value != "." and (root / value).is_file()
+    }
+    for value in explicit_files:
+        if _kind(value) == "unsupported":
+            raise ValueError(f"unsupported explicit source: {value}")
     selected = {
         path: True
         for path in tracked
         if (root / path).is_file()
-        and path_matches(path, config.include)
+        and any(_inside_selection(path, value) for value in selected_paths)
+        and (path in explicit_files or path_matches(path, config.include))
         and not path_matches(path, config.exclude)
         and _kind(path) != "unsupported"
-        and (_kind(path) != "text" or path_matches(path, config.plaintext))
+        and (
+            path in explicit_files
+            or _kind(path) != "text"
+            or path_matches(path, config.plaintext)
+        )
     }
     for path in config.untracked:
         normalized = Path(path).as_posix()
+        if not any(_inside_selection(normalized, value) for value in selected_paths):
+            continue
         if normalized in selected:
             continue
         if normalized in tracked_set:
@@ -125,6 +148,9 @@ def discover_sources(root: Path, config: ProjectConfig) -> list[SourceInput]:
                 f"configured untracked plaintext requires plaintext selection: {normalized}"
             )
         selected[normalized] = False
+    for normalized in explicit_files:
+        if normalized not in selected:
+            selected[normalized] = normalized in tracked_set
     inputs = [_read_source(root, path, tracked) for path, tracked in sorted(selected.items())]
     resolved: list[SourceInput] = []
     for item in inputs:
