@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from architecture_graph.analysis_types import RecordCatalog
+from architecture_graph.paging import page_records
+from architecture_graph.query import QueryEnvelope
+from architecture_graph.records import RECORD_TYPES, Record
+from architecture_graph.semantic_graph import GraphResult, bounded_neighbors
+from architecture_graph.snapshot import SnapshotReader
+
+
+def _catalog(reader: SnapshotReader) -> RecordCatalog:
+    return RecordCatalog.from_records(record for record_type in RECORD_TYPES for record in reader.iter(record_type))
+
+
+def terms_query(reader: SnapshotReader, *, fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
+    records = sorted((dict(x) for x in reader.iter("terms")), key=lambda x: (-float(x["tfidf"]), str(x["id"])))
+    return page_records(records, binding={"snapshot_id": reader.snapshot_id, "command": "terms", "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)
+
+
+def decisions_query(reader: SnapshotReader, *, score: str = "navigation", fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
+    if score not in {"navigation", "criticality", "review_priority", "extraction_confidence"}: raise ValueError("invalid score")
+    rankings = {str(x["node_id"]): x for x in reader.iter("rankings")}
+    records = []
+    for decision in reader.iter("decisions"):
+        item = dict(decision)
+        ranking = rankings.get(str(item["id"]))
+        item["scores"] = {} if ranking is None else ranking["scores"]
+        records.append(item)
+    records.sort(key=lambda x: (-float((x.get("scores", {}).get(score) or {}).get("score", 0)), str(x["id"])))
+    return page_records(records, binding={"snapshot_id": reader.snapshot_id, "command": "decisions", "score": score, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)
+
+
+def neighbors_query(reader: SnapshotReader, *, node_id: str, depth: int = 1, fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
+    catalog = _catalog(reader)
+    graph = GraphResult(tuple(r for r in catalog.all() if r["kind"] not in {"edge", "ranking"}), catalog.iter("edge"), catalog)
+    result = bounded_neighbors(graph, node_id, depth, limit)
+    records = [dict(item) for item in result.nodes]
+    return page_records(records, binding={"snapshot_id": reader.snapshot_id, "command": "neighbors", "node_id": node_id, "depth": depth, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)
+
+
+def evidence_query(reader: SnapshotReader, *, record_id: str, fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
+    catalog = _catalog(reader)
+    record = catalog.get(record_id)
+    evidence_ids = list(record.get("evidence_ids", []))
+    records = [dict(catalog.get(str(item))) for item in evidence_ids]
+    return page_records(records, binding={"snapshot_id": reader.snapshot_id, "command": "evidence", "record_id": record_id, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)
+
+
+def explain_query(reader: SnapshotReader, *, record_id: str, fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
+    catalog = _catalog(reader)
+    record = catalog.get(record_id)
+    rankings = [dict(x) for x in catalog.iter("ranking") if x.get("node_id") == record_id]
+    evidence = [dict(catalog.get(str(item))) for item in record.get("evidence_ids", [])[:limit]]
+    derivations = [dict(catalog.get(str(item))) for item in record.get("derivation_ids", []) if catalog.maybe_get(str(item))]
+    item: Record = {"id": "explanation:" + record_id, "kind": "explanation", "record": dict(record), "rankings": rankings, "evidence": evidence, "derivations": derivations, "evidence_ids": list(record.get("evidence_ids", [])), "derivation_ids": list(record.get("derivation_ids", []))}
+    return page_records([item], binding={"snapshot_id": reader.snapshot_id, "command": "explain", "record_id": record_id, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=1, max_chars=max_chars, cursor=cursor)
