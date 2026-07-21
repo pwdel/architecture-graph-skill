@@ -15,6 +15,15 @@ def git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def ignore_architecture_graph(repo: Path) -> None:
+    ignore = repo / ".gitignore"
+    prior = ignore.read_text() if ignore.exists() else ""
+    if ".architecture-graph/\n" not in prior:
+        ignore.write_text(prior + ".architecture-graph/\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-m", "ignore architecture graph memory")
+
+
 @pytest.fixture
 def architecture_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
