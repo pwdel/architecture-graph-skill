@@ -12,6 +12,8 @@ def test_report_has_citable_architecture_sections(phase1_repository) -> None:
     report = build_report(reader, limits=ReportLimits.defaults())
     assert report.assertions
     assert all(item["evidence_ids"] for item in report.assertions)
+    assert all(item["citations"] for item in report.assertions)
+    assert all(item["citations"][0]["path"] and item["citations"][0]["span"]["start_line"] for item in report.assertions)
     text = render_report_text(report)
     assert "Navigation hubs" in text
     assert "Critical decisions and constraints" in text

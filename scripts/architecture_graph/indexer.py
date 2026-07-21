@@ -41,6 +41,7 @@ from architecture_graph.project import (
     _decode_git_path,
     capture_git_observation,
 )
+from architecture_graph.report import ReportLimits, build_catalog_report
 from architecture_graph.records import (
     RECORD_KIND_BY_TYPE,
     Record,
@@ -850,15 +851,24 @@ def index_repository(
     phase1_catalog = RecordCatalog.from_records(
         record for records in records_by_type.values() for record in records
     )
-    analyzed = analyze_catalog(phase1_catalog).records_by_type()
+    analyzed = analyze_catalog(
+        phase1_catalog,
+        model_name=config.spacy_model,
+        tool_version=__version__,
+        configuration_digest=config_digest,
+        pipeline_digest=pipeline_digest,
+    ).records_by_type()
     records_by_type = {
         record_type: analyzed.get(record_type, ())
         for record_type in RECORD_KIND_BY_TYPE
     }
+    analyzed_catalog = RecordCatalog.from_records(
+        record for records in records_by_type.values() for record in records
+    )
     bundle = SnapshotBundle(
         snapshot_kind="deterministic",
         configuration_digest=config_digest,
-        schema_versions={"snapshot": 1, "records": 1},
+        schema_versions={"snapshot": 1, "records": 1, "semantic": 1},
         frozen_review_set_digest=sha256_digest(b""),
         material_input_digest=material_digest,
         source_revision_digest=revision_digest,
@@ -869,7 +879,7 @@ def index_repository(
         parent_snapshot_id=None,
         base_deterministic_snapshot_id=None,
         records_by_type=records_by_type,
-        report=_report(sources, ingestion),
+        report=_report(sources, ingestion) + "\n" + build_catalog_report(analyzed_catalog, limits=ReportLimits.defaults()),
     )
     git_observation = _prepublication_observation(
         repository, config_path, observed_at, capture.token, selected_paths

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from architecture_graph.canonical import stable_id
 from architecture_graph.records import JSONValue, RECORD_KIND_BY_TYPE, Record, finalize_record
@@ -121,16 +123,31 @@ class AnalysisResult:
         return self.catalog.records_by_type()
 
 
+_ANALYSIS_IDENTITY: ContextVar[tuple[str, str, str]] = ContextVar(
+    "analysis_identity", default=("0.3.0", "sha256:" + "0" * 64, "sha256:" + "0" * 64)
+)
+
+
+@contextmanager
+def analysis_identity(tool_version: str, configuration_digest: str, pipeline_digest: str):
+    token = _ANALYSIS_IDENTITY.set((tool_version, configuration_digest, pipeline_digest))
+    try:
+        yield
+    finally:
+        _ANALYSIS_IDENTITY.reset(token)
+
+
 def build_analysis_derivation(method: str, input_ids: Iterable[str], output_kind: str, output_key: str) -> Record:
     inputs = tuple(sorted(set(input_ids)))
+    tool_version, configuration_digest, pipeline_digest = _ANALYSIS_IDENTITY.get()
     record_id = stable_id("derivation", "deterministic", method, inputs, output_kind, output_key)
     return finalize_record(
         {
             "id": record_id, "kind": "derivation", "producer_kind": "deterministic",
-            "method": method, "tool": "architecture-graph", "tool_version": "0.3",
+            "method": method, "tool": "architecture-graph", "tool_version": tool_version,
             "model": None, "model_version": None, "model_artifact_digest": None,
-            "configuration_digest": "sha256:" + "0" * 64,
-            "pipeline_digest": "sha256:" + "0" * 64, "input_ids": list(inputs),
+            "configuration_digest": configuration_digest,
+            "pipeline_digest": pipeline_digest, "input_ids": list(inputs),
             "output_kind": output_kind, "output_identity_key": output_key,
             "created_at": None,
         }

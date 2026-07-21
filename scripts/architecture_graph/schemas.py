@@ -83,4 +83,16 @@ def validate_snapshot_references(records_by_type: Mapping[str, Sequence[Record]]
             for field in ("from_id", "to_id"):
                 if record.get(field) not in ids:
                     issues.append(ValidationIssue(field, f"missing reference {record.get(field)}"))
+        if record.get("kind") == "claim":
+            for field in ("subject", "object"):
+                argument = record.get(field)
+                if isinstance(argument, Mapping) and argument.get("kind") == "entity_ref" and argument.get("entity_id") not in ids:
+                    issues.append(ValidationIssue(field + ".entity_id", f"missing reference {argument.get('entity_id')}"))
+        if record.get("kind") == "decision":
+            for field in ("claim_ids", "rationale_evidence_ids", "consequence_evidence_ids", "supporting_claim_ids", "contradicting_claim_ids"):
+                for reference in record.get(field, []) if isinstance(record.get(field), list) else []:
+                    if reference not in ids:
+                        issues.append(ValidationIssue(field, f"missing reference {reference}"))
+        if record.get("kind") == "ranking" and record.get("node_id") not in ids:
+            issues.append(ValidationIssue("node_id", f"missing reference {record.get('node_id')}"))
     return tuple(sorted(issues))

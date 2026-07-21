@@ -29,12 +29,18 @@ def _format(source: Record, segment: Record) -> str:
 
 
 def normalize_evidence(catalog: RecordCatalog) -> tuple[EvidenceUnit, ...]:
-    units: list[EvidenceUnit] = []
+    grouped: dict[tuple[object, ...], list[tuple[Record, Record, Record]]] = {}
     for evidence in catalog.iter("evidence"):
         segment = catalog.get(str(evidence["segment_id"]))
         source = catalog.get(str(evidence["source_version_id"]))
+        key = (evidence["source_content_hash"], segment.get("segment_kind"), tuple(segment.get("heading_path", [])), segment.get("text"))
+        grouped.setdefault(key, []).append((evidence, segment, source))
+    units: list[EvidenceUnit] = []
+    for entries in grouped.values():
+        evidence, segment, source = min(entries, key=lambda item: str(item[0]["path"]))
         metadata = segment.get("metadata", {})
-        metadata = metadata if isinstance(metadata, dict) else {}
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata["citation_paths"] = sorted({str(item[0]["path"]) for item in entries})
         derivation = build_analysis_derivation("normalize_evidence", (str(evidence["id"]),), "evidence_unit", str(evidence["id"]))
         units.append(
             EvidenceUnit(
@@ -50,14 +56,14 @@ def normalize_evidence(catalog: RecordCatalog) -> tuple[EvidenceUnit, ...]:
                 derivation_id=str(derivation["id"]),
             )
         )
-    return tuple(sorted(units, key=lambda item: item.evidence_id))
+    return tuple(sorted(units, key=lambda item: (item.source_content_hash, item.segment_kind, item.text, item.evidence_id)))
 
 
 def parse_evidence(units: tuple[EvidenceUnit, ...], model_name: str | None = None) -> ParsedCorpus:
     derivations: list[Record] = []
     warnings: list[Record] = []
     if model_name:
-        warning_derivation = build_analysis_derivation("rule_tokenizer_fallback", (), "warning", model_name)
+        warning_derivation = build_analysis_derivation("rule_tokenizer_fallback", (unit.evidence_id for unit in units), "warning", model_name)
         warnings.append(finalize_record({"id": "warning:model_unavailable:" + model_name, "kind": "warning", "code": "model_unavailable", "message": f"local model unavailable: {model_name}", "source_version_id": None, "span": None, "possible_role": None, "derivation_ids": [warning_derivation["id"]]}))
         derivations.append(warning_derivation)
     sentences: list[ParsedSentence] = []

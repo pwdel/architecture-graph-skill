@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from architecture_graph.analysis_types import AnalysisResult, RecordCatalog
+from architecture_graph.analysis_types import AnalysisResult, RecordCatalog, analysis_identity
 from architecture_graph.claims import materialize_claims
 from architecture_graph.decisions import attach_decisions, reduce_decisions
 from architecture_graph.entities import resolve_entities
@@ -12,7 +12,12 @@ from architecture_graph.semantic_graph import build_evidence_graph
 from architecture_graph.terms import discover_terms
 
 
-def analyze_catalog(phase1: RecordCatalog, *, model_name: str | None = None) -> AnalysisResult:
+def analyze_catalog(phase1: RecordCatalog, *, model_name: str | None = None, tool_version: str = "0.3.0", configuration_digest: str = "sha256:" + "0" * 64, pipeline_digest: str = "sha256:" + "0" * 64) -> AnalysisResult:
+    with analysis_identity(tool_version, configuration_digest, pipeline_digest):
+        return _analyze_catalog(phase1, model_name=model_name)
+
+
+def _analyze_catalog(phase1: RecordCatalog, *, model_name: str | None = None) -> AnalysisResult:
     parsed = parse_evidence(normalize_evidence(phase1), model_name)
     catalog = phase1.add((*parsed.warnings, *parsed.derivations))
     terms = discover_terms(parsed)

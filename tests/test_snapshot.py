@@ -117,6 +117,14 @@ def changed_bundle(original: SnapshotBundle, **changes: object) -> SnapshotBundl
     return SnapshotBundle(**{**original.__dict__, **changes})
 
 
+def test_snapshot_validation_rejects_invalid_semantic_record(tmp_path: Path) -> None:
+    invalid_term = finalize_record({"id": "term:broken", "kind": "term"})
+    invalid = changed_bundle(bundle(), schema_versions={"snapshot": 1, "records": 1, "semantic": 1}, records_by_type={**bundle().records_by_type, "terms": [invalid_term]})
+    project = ProjectPaths.resolve(tmp_path, tmp_path / "memory")
+    with pytest.raises(ValueError, match="semantic snapshot validation failed"):
+        SnapshotFinalizer(project, invalid).validate()
+
+
 def reidentify_snapshot(
     snapshot_dir: Path, manifest: dict[str, object]
 ) -> tuple[str, Path]:

@@ -32,9 +32,20 @@ def build_evidence_graph(catalog: RecordCatalog) -> GraphResult:
     node_kinds = {"source", "segment", "evidence", "term", "entity", "claim", "decision", "warning", "derivation"}
     nodes = tuple(record for record in catalog.all() if record.get("kind") in node_kinds)
     edges: list[Record] = []
+    canonical_sources: dict[str, str] = {}
+    for source in catalog.iter("source"):
+        digest = str(source.get("content_hash", source["id"]))
+        prior = canonical_sources.get(digest)
+        if prior is None or str(source.get("path", "")) < str(catalog.get(prior).get("path", "")):
+            canonical_sources[digest] = str(source["id"])
+    eligible_sources = set(canonical_sources.values())
     for segment in catalog.iter("segment"):
+        if str(segment["source_version_id"]) not in eligible_sources:
+            continue
         edges.append(_edge("CONTAINS", str(segment["source_version_id"]), str(segment["id"]), segment.get("evidence_ids", []), segment.get("derivation_ids", [])))
     for evidence in catalog.iter("evidence"):
+        if str(evidence["source_version_id"]) not in eligible_sources:
+            continue
         edges.append(_edge("CONTAINS", str(evidence["segment_id"]), str(evidence["id"]), (evidence["id"],), evidence.get("derivation_ids", []), (evidence["source_content_hash"],)))
     for kind in ("term", "entity"):
         for record in catalog.iter(kind):
