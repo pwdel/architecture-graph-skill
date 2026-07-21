@@ -103,6 +103,45 @@ def test_index_corpus_requires_ignore_before_writing(architecture_repo: Path) ->
     assert not (architecture_repo / ".architecture-graph").exists()
 
 
+def test_cli_json_ignore_error_is_actionable(
+    architecture_repo: Path, capsys
+) -> None:
+    assert main(["index", str(architecture_repo), "--json"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["error"]["code"] == "memory_not_ignored"
+    assert payload["error"]["path"] == ".architecture-graph/"
+
+
+def test_cli_index_status_find_get_workflow(architecture_repo: Path, capsys) -> None:
+    from conftest import ignore_architecture_graph
+
+    ignore_architecture_graph(architecture_repo)
+    assert main(["index", str(architecture_repo), "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    corpus_id = indexed["corpus_id"]
+    assert main(["memory", "status", str(architecture_repo), "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["items"][0]["state"] == "fresh"
+    assert main(
+        [
+            "find", "segments", "--repo", str(architecture_repo),
+            "--corpus", corpus_id, "--contains", "OrderPlaced", "--json",
+        ]
+    ) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["items"]
+    segment_id = found["items"][0]["id"]
+    assert main(
+        [
+            "get", "segments", segment_id, "--repo", str(architecture_repo),
+            "--corpus", corpus_id, "--json",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["items"][0]["id"] == segment_id
+
+
 def test_recoverable_scalar_failure_marks_source_partial(
     phase1_repository: Path, tmp_path: Path
 ) -> None:
@@ -1195,7 +1234,10 @@ def test_explicit_config_cli_failure_is_stderr_only_and_preserves_pointer(
     assert main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.startswith("architecture-graph: configuration ")
+    if json_mode:
+        assert json.loads(captured.err)["error"]["code"] == "invalid_request"
+    else:
+        assert captured.err.startswith("architecture-graph: configuration ")
     assert "Traceback" not in captured.err
     assert project.current_path.read_bytes() == before
 
@@ -1212,7 +1254,10 @@ def test_non_repository_cli_failure_is_stderr_only(
     assert main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.startswith("architecture-graph: ")
+    if json_mode:
+        assert json.loads(captured.err)["error"]["code"] == "invalid_request"
+    else:
+        assert captured.err.startswith("architecture-graph: ")
     assert "Traceback" not in captured.err
     assert not (tmp_path / "memory").exists()
 
@@ -1234,7 +1279,10 @@ def test_file_valued_memory_root_is_stderr_only(
     assert main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.endswith("(NotADirectoryError)\n")
+    if json_mode:
+        assert json.loads(captured.err)["error"]["code"] == "invalid_request"
+    else:
+        assert "Not a directory" in captured.err
     assert len(captured.err.splitlines()) == 1
     assert memory_file.read_bytes() == b"sentinel"
 
@@ -1269,7 +1317,10 @@ def test_unwritable_memory_root_is_stderr_only_and_preserves_pointer(
     assert main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.endswith("(PermissionError)\n")
+    if json_mode:
+        assert json.loads(captured.err)["error"]["code"] == "permission_denied"
+    else:
+        assert "simulated unwritable memory root" in captured.err
     assert len(captured.err.splitlines()) == 1
     assert project.current_path.read_bytes() == pointer_before
 
