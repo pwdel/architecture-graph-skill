@@ -22,6 +22,7 @@ class ReportLimits:
 class ReportResult:
     assertions: tuple[Record, ...]
     sections: tuple[tuple[str, tuple[Record, ...]], ...]
+    coverage: Record
 
 
 def build_report(reader: SnapshotReader, *, limits: ReportLimits) -> ReportResult:
@@ -35,14 +36,16 @@ def build_report(reader: SnapshotReader, *, limits: ReportLimits) -> ReportResul
     evidence = {str(x["id"]): x for x in reader.iter("evidence")}
     titles = ("Navigation hubs", "Critical decisions and constraints", "Review priorities", "Glossary candidates")
     sections = _hydrate_sections((navigation, decisions, review, terms), evidence, titles, limits.citation_limit)
-    result = _report_result(titles, sections)
+    from architecture_graph.semantic_queries import _coverage
+    coverage = _coverage(reader)
+    result = _report_result(titles, sections, coverage)
     mutable = [list(section) for section in sections]
     while len(render_report_text(result)) > limits.max_chars and any(mutable):
         for index in range(len(mutable) - 1, -1, -1):
             if mutable[index]:
                 mutable[index].pop()
                 break
-        result = _report_result(titles, tuple(tuple(section) for section in mutable))
+        result = _report_result(titles, tuple(tuple(section) for section in mutable), coverage)
     if len(render_report_text(result)) > limits.max_chars:
         raise ValueError("report max_chars is too small for report headings")
     return result
@@ -64,9 +67,9 @@ def _hydrate_sections(sections, evidence: dict[str, Record], titles, citation_li
     return tuple(tuple(_hydrate_assertion(dict(item), evidence, title, citation_limit) for item in section if item.get("evidence_ids")) for title, section in zip(titles, sections, strict=True))
 
 
-def _report_result(titles, sections) -> ReportResult:
+def _report_result(titles, sections, coverage: Record | None = None) -> ReportResult:
     assertions = tuple(item for section in sections for item in section)
-    return ReportResult(assertions, tuple(zip(titles, sections, strict=True)))
+    return ReportResult(assertions, tuple(zip(titles, sections, strict=True)), coverage or {})
 
 
 def build_catalog_report(catalog: RecordCatalog, *, limits: ReportLimits) -> str:
@@ -85,6 +88,8 @@ def build_catalog_report(catalog: RecordCatalog, *, limits: ReportLimits) -> str
 
 def render_report_text(result: ReportResult) -> str:
     lines = ["# Architecture Graph Report", "", "## Coverage", ""]
+    if result.coverage:
+        lines.extend([f"- Selected sources: {result.coverage['selected_sources']}", f"- Parsed sources: {result.coverage['parsed_sources']}", f"- Eligible segments: {result.coverage['eligible_segments']}", f"- Decisions: {result.coverage['decision_records']} from {result.coverage['decision_candidates']} candidates", ""])
     if not result.assertions: lines.extend(["No qualified claims were extracted.", ""])
     for title, items in result.sections:
         lines.extend([f"## {title}", ""])

@@ -12,6 +12,7 @@ def test_report_has_citable_architecture_sections(phase1_repository) -> None:
     reader = SnapshotReader.open(ProjectPaths.for_corpus(result.selection))
     report = build_report(reader, limits=ReportLimits.defaults())
     assert report.assertions
+    assert report.coverage["eligible_segments"] > 0
     assert all(item["evidence_ids"] for item in report.assertions)
     assert all(item["citations"] for item in report.assertions)
     assert all(item["citations"][0]["path"] and item["citations"][0]["span"]["start_line"] for item in report.assertions)

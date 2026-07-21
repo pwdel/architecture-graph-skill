@@ -12,7 +12,7 @@ from architecture_graph.canonical import canonical_dumps
 from architecture_graph.capabilities import capability_record
 from architecture_graph.corpus import CorpusSelection, MemoryNotIgnoredError
 from architecture_graph.config import ConfigurationPathError
-from architecture_graph.errors import ArchitectureGraphError
+from architecture_graph.errors import ArchitectureGraphError, RecordTooLargeError
 from architecture_graph.indexer import index_corpus
 from architecture_graph.project import ProjectPaths, RepositoryStateError
 from architecture_graph.query import (
@@ -171,6 +171,8 @@ def _print_error(error: ArchitectureGraphError, as_json: bool) -> None:
 
 
 def _as_expected(error: Exception) -> ArchitectureGraphError:
+    if isinstance(error, RecordTooLargeError):
+        return ArchitectureGraphError("record_too_large", str(error), error.record_id)
     if isinstance(error, MemoryNotIgnoredError):
         ignored_path = str(error).split("add ", 1)[-1].split(" to ", 1)[0]
         return ArchitectureGraphError(
@@ -258,7 +260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report = build_report(reader, limits=ReportLimits(max_chars=args.max_chars))
                 if as_json:
                     assertions = [{key: value for key, value in item.items() if key != "evidence_ids"} for item in report.assertions]
-                    print(canonical_dumps({"assertions": assertions, "text": render_report_text(report)}))
+                    print(canonical_dumps({"coverage": report.coverage, "assertions": assertions, "text": render_report_text(report)}))
                 else:
                     sys.stdout.write(render_report_text(report))
                 return 0

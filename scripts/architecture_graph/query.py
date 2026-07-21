@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from collections.abc import Mapping, Sequence
@@ -28,14 +28,21 @@ class QueryEnvelope:
     omitted_count: int = 0
     cursor: str | None = None
     max_chars: int = 12_000
+    coverage: Record = field(default_factory=dict)
+    diagnostics: tuple[Record, ...] = ()
 
     def as_json(self) -> dict[str, object]:
-        return {
+        payload = {
             "items": list(self.items),
             "truncated": self.truncated,
             "omitted_count": self.omitted_count,
             "cursor": self.cursor,
         }
+        if self.coverage:
+            payload["coverage"] = self.coverage
+        if self.diagnostics:
+            payload["diagnostics"] = list(self.diagnostics)
+        return payload
 
 
 def _project(record: Mapping[str, JSONValue], fields: Sequence[str] | None) -> Record:
