@@ -24,12 +24,38 @@ def _bounded(value: float) -> float:
     return round(max(0.0, min(1.0, value)), 8)
 
 
+def _pagerank(graph: GraphResult, *, damping: float = 0.85, iterations: int = 24) -> dict[str, float]:
+    node_ids = sorted(str(node["id"]) for node in graph.nodes)
+    if not node_ids:
+        return {}
+    outgoing: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
+    for edge in graph.edges:
+        source, target = str(edge["from_id"]), str(edge["to_id"])
+        if source in outgoing and target in outgoing:
+            outgoing[source].add(target)
+    count = len(node_ids)
+    scores = {node_id: 1.0 / count for node_id in node_ids}
+    for _ in range(iterations):
+        dangling = sum(scores[node_id] for node_id in node_ids if not outgoing[node_id]) / count
+        updated = {node_id: (1.0 - damping) / count + damping * dangling for node_id in node_ids}
+        for source in node_ids:
+            targets = sorted(outgoing[source])
+            if targets:
+                contribution = damping * scores[source] / len(targets)
+                for target in targets:
+                    updated[target] += contribution
+        scores = updated
+    maximum = max(scores.values(), default=1.0)
+    return {node_id: _bounded(scores[node_id] / maximum) for node_id in node_ids}
+
+
 def rank_graph(graph: GraphResult, catalog: RecordCatalog) -> RankingResult:
     degree = Counter()
     for edge in graph.edges:
         degree[str(edge["from_id"])] += 1
         degree[str(edge["to_id"])] += 1
     maximum = max(degree.values(), default=1)
+    pagerank = _pagerank(graph)
     rankings = []
     derivations = []
     rule_version = "scoring-v1"
@@ -38,7 +64,8 @@ def rank_graph(graph: GraphResult, catalog: RecordCatalog) -> RankingResult:
         node_id = str(node["id"])
         evidence_ids = [str(x) for x in node.get("evidence_ids", [])]
         hashes = {str(catalog.get(e)["source_content_hash"]) for e in evidence_ids if catalog.maybe_get(e)}
-        navigation_features = {"typed_degree": degree[node_id] / maximum, "evidence_breadth": min(1.0, len(hashes) / 3)}
+        tfidf = float(node.get("tfidf", 0.0))
+        navigation_features = {"typed_degree": degree[node_id] / maximum, "pagerank": pagerank.get(node_id, 0.0), "lexical_salience": _bounded(tfidf / (1.0 + tfidf)), "evidence_breadth": min(1.0, len(hashes) / 3)}
         required = node.get("kind") == "claim" and (node.get("qualifiers") or {}).get("modality") == "required"
         critical_features = {"required_modality": 1.0 if required else 0.0, "evidence_breadth": min(1.0, len(hashes) / 3)}
         review_features = {"missing_rationale": 1.0 if node.get("kind") == "decision" and not node.get("rationale_evidence_ids") else 0.0, "contradiction": 1.0 if node.get("contradicting_claim_ids") else 0.0}

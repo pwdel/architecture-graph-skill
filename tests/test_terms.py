@@ -10,3 +10,6 @@ def test_terms_are_source_backed_and_ranked() -> None:
     assert checkout["distinct_source_count"] == 1
     assert checkout["tfidf"] > 0
     assert checkout["evidence_ids"] == ["evidence:one"]
+    assert checkout["occurrence_count"] == 1
+    assert checkout["phrase_frequency"] == 0
+    assert checkout["lexical_features"]["tfidf"] == checkout["tfidf"]
