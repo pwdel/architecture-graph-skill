@@ -172,6 +172,13 @@ def test_cli_reads_and_reuses_explicit_legacy_memory(
         ]
     ) == 0
     assert json.loads(capsys.readouterr().out)["items"]
+    assert main(
+        [
+            "find", "segments", "--repo", str(architecture_repo),
+            "--memory-root", str(memory), "--corpus", "missing", "--json",
+        ]
+    ) == 2
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "corpus_not_found"
 
 
 def test_in_repository_memory_override_must_be_ignored(

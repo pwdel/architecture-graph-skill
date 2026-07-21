@@ -107,7 +107,7 @@ def _select_project(
     )
     corpora = base / "corpora"
     metadata_files = sorted(corpora.glob("*/CORPUS.json")) if corpora.is_dir() else []
-    if memory_root is not None and not metadata_files:
+    if memory_root is not None and corpus_id is None and not metadata_files:
         legacy = ProjectPaths.resolve(root, memory_root)
         if legacy.current_path.is_file():
             return legacy
