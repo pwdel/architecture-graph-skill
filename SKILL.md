@@ -52,6 +52,16 @@ before opening broad source files:
   --corpus CORPUS_ID --fields id,path,parse_status --json
 ```
 
+Indexing analyzes and ranks the complete selected corpus. Query `--limit` and
+`--max-chars` values constrain only compact response projections. List results
+include evidence counts and representative evidence IDs; use `get`, `evidence`,
+and `explain` for full records, paginated provenance, and score feature vectors.
+
+Reports are concise by default and expose stable appendix assertion IDs. Pass
+an assertion ID to `evidence --for` to retrieve its complete evidence ledger.
+Decision rankings keep navigation, criticality, review priority, extraction
+confidence, corroboration, and completeness independent.
+
 Phase 2 analyzes prose and text-native diagrams without requiring JSON. Raster
 images, review mutation, decision lineage, and semantic snapshot diff are not
 implemented.
@@ -60,7 +70,7 @@ implemented.
 
 - Treat deterministic, LLM, and human origins as separate fields. Phase 2 emits deterministic records only.
 - Require source evidence for every architecture assertion.
-- Treat navigation, extraction confidence, criticality, and review priority as independent dimensions.
+- Treat navigation, extraction confidence, corroboration, completeness, criticality, and review priority as independent dimensions.
 - Do not promote an unaccepted proposal into current commitments.
 - Keep generated snapshots separate from the human review ledger.
 - Open full source files only for the small evidence set returned by bounded commands.

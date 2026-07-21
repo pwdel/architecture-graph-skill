@@ -13,7 +13,7 @@ from architecture_graph.semantic_graph import build_evidence_graph
 from architecture_graph.terms import discover_terms
 
 
-def analyze_catalog(phase1: RecordCatalog, *, model_name: str | None = None, tool_version: str = "0.3.0", configuration_digest: str = "sha256:" + "0" * 64, pipeline_digest: str = "sha256:" + "0" * 64) -> AnalysisResult:
+def analyze_catalog(phase1: RecordCatalog, *, model_name: str | None = None, tool_version: str = "0.3.1", configuration_digest: str = "sha256:" + "0" * 64, pipeline_digest: str = "sha256:" + "0" * 64) -> AnalysisResult:
     with analysis_identity(tool_version, configuration_digest, pipeline_digest):
         return _analyze_catalog(phase1, model_name=model_name)
 

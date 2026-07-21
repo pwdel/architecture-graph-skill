@@ -69,6 +69,6 @@ def test_diagram_claims_use_real_endpoints(tmp_path) -> None:
 def test_semantic_derivations_use_active_snapshot_identity(tmp_path) -> None:
     reader = _index(tmp_path / "repo")
     derivation = next(x for x in reader.iter("derivations") if x["method"] == "sparse_tfidf")
-    assert derivation["tool_version"] == "0.3.0"
+    assert derivation["tool_version"] == "0.3.1"
     assert derivation["configuration_digest"] == reader.manifest["configuration_digest"]
     assert derivation["pipeline_digest"] == reader.manifest["deterministic_pipeline_digest"]

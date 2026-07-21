@@ -183,6 +183,6 @@ uv run architecture-graph index tests/fixtures/phase1_repo --json
 
 ## Current Status
 
-Version 0.3.0 provides deterministic prose-first evidence graphs. JSON and YAML
+Version 0.3.1 provides deterministic prose-first evidence graphs with complete-corpus ranking and bounded evidence retrieval. JSON and YAML
 contribute structure but are optional. The next increments may add human review
 and semantic history; image interpretation remains outside the current scope.

@@ -137,7 +137,7 @@ class AnalysisResult:
 
 
 _ANALYSIS_IDENTITY: ContextVar[tuple[str, str, str]] = ContextVar(
-    "analysis_identity", default=("0.3.0", "sha256:" + "0" * 64, "sha256:" + "0" * 64)
+    "analysis_identity", default=("0.3.1", "sha256:" + "0" * 64, "sha256:" + "0" * 64)
 )
 
 
