@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from dataclasses import dataclass
 import json
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 
 import jmespath
+from jmespath.exceptions import JMESPathError
 
 from architecture_graph.canonical import canonical_bytes, canonical_dumps, sha256_digest
 from architecture_graph.config import configuration_identity
@@ -62,7 +64,14 @@ def _read_cursor(raw: str, binding: Mapping[str, object]) -> int:
         if type(offset) is not int or offset < 0:
             raise ValueError
         return offset
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+    except (
+        ValueError,
+        KeyError,
+        TypeError,
+        UnicodeError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ) as error:
         raise ValueError("cursor does not match this query") from error
 
 
@@ -152,22 +161,36 @@ def find_snapshot_records(
             continue
         if contains is not None and contains.casefold() not in canonical_dumps(record).casefold():
             continue
-        if expression is not None and not bool(jmespath.search(expression, record)):
-            continue
-        matches.append(_project(record, fields))
-    page = matches[offset : offset + limit]
-    next_offset = offset + len(page)
-    omitted = max(0, len(matches) - next_offset)
-    next_cursor = _cursor(binding, next_offset) if omitted else None
-    return _fit(
-        QueryEnvelope(
-            tuple(page),
-            truncated=omitted > 0,
-            omitted_count=omitted,
+        matches.append(dict(record))
+    candidates = matches[offset : offset + limit]
+    retained: list[tuple[int, Record]] = []
+    try:
+        for position, record in enumerate(candidates):
+            if expression is None or bool(jmespath.search(expression, record)):
+                retained.append((position, _project(record, fields)))
+    except JMESPathError as error:
+        raise ValueError(f"invalid JMESPath expression: {error}") from error
+    while True:
+        if retained:
+            next_offset = offset + retained[-1][0] + 1
+        else:
+            next_offset = offset + len(candidates)
+        omitted = max(0, len(matches) - next_offset)
+        next_cursor = _cursor(binding, next_offset) if omitted else None
+        envelope = QueryEnvelope(
+            tuple(item for _, item in retained),
+            truncated=omitted > 0 or len(retained) < len(candidates),
+            omitted_count=omitted + (len(candidates) - len(retained)),
             cursor=next_cursor,
             max_chars=max_chars,
         )
-    )
+        try:
+            render_query_envelope(envelope, "json")
+            return envelope
+        except ValueError:
+            if not retained:
+                raise
+            retained.pop()
 
 
 def memory_status(
@@ -185,6 +208,10 @@ def memory_status(
     repository = find_git_worktree(paths[0])
     selection = resolve_corpus(paths, configuration_identity(repository, config_path))
     project = ProjectPaths.for_corpus(selection, memory_root)
+    if memory_root is not None and selection.inputs == (".",):
+        legacy = ProjectPaths.resolve(repository, memory_root)
+        if legacy.current_path.is_file():
+            project = legacy
     required_ignore = None
     if memory_root is None:
         import os
@@ -205,6 +232,8 @@ def memory_status(
             "required_ignore": required_ignore,
             "writable": required_ignore is None,
         }
+        if fields is not None and "state" not in fields:
+            fields = ("state", *fields)
         return _fit(QueryEnvelope((_project(item, fields),), max_chars=max_chars))
     reader = SnapshotReader.open(project)
     capture = _stable_repository_capture(

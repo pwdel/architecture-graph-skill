@@ -79,3 +79,37 @@ def test_get_and_find_are_bounded_and_cursor_stable(architecture_repo: Path) -> 
     rendered = render_query_envelope(first, "json")
     assert rendered.endswith("\n")
     assert len(rendered) <= first.max_chars
+
+
+def test_character_budget_cursor_does_not_skip_trimmed_items() -> None:
+    class Reader:
+        snapshot_id = "deterministic:" + ("a" * 64)
+
+        def iter(self, record_type):
+            return iter(
+                [
+                    {"id": f"segment:{index}", "text": str(index) * 120}
+                    for index in range(3)
+                ]
+            )
+
+    reader = Reader()
+    first = find_snapshot_records(reader, "segments", limit=2, max_chars=700)
+    assert len(first.items) == 1
+    second = find_snapshot_records(
+        reader, "segments", limit=2, max_chars=700, cursor=first.cursor
+    )
+    assert second.items[0]["id"] == "segment:1"
+
+
+def test_malformed_cursor_and_jmespath_are_user_errors() -> None:
+    class Reader:
+        snapshot_id = "deterministic:" + ("b" * 64)
+
+        def iter(self, record_type):
+            return iter([{"id": "segment:1", "text": "accepted"}])
+
+    with pytest.raises(ValueError, match="cursor"):
+        find_snapshot_records(Reader(), "segments", cursor="not-base64")
+    with pytest.raises(ValueError, match="JMESPath"):
+        find_snapshot_records(Reader(), "segments", expression="[")

@@ -142,6 +142,49 @@ def test_cli_index_status_find_get_workflow(architecture_repo: Path, capsys) -> 
     assert json.loads(capsys.readouterr().out)["items"][0]["id"] == segment_id
 
 
+def test_cli_query_uses_environment_memory_root(
+    architecture_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    memory = tmp_path / "memory"
+    monkeypatch.setenv("ARCHITECTURE_GRAPH_MEMORY_ROOT", str(memory))
+    assert main(["index", str(architecture_repo), "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    assert main(
+        [
+            "find", "segments", "--repo", str(architecture_repo),
+            "--corpus", indexed["corpus_id"], "--json",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["items"]
+
+
+def test_cli_reads_and_reuses_explicit_legacy_memory(
+    architecture_repo: Path, tmp_path: Path, capsys
+) -> None:
+    memory = tmp_path / "legacy-memory"
+    legacy = index_repository(architecture_repo, memory_root=memory)
+    upgraded = index_corpus((architecture_repo,), memory_root=memory)
+    assert upgraded.snapshot_id == legacy.snapshot_id
+    assert main(
+        [
+            "find", "segments", "--repo", str(architecture_repo),
+            "--memory-root", str(memory), "--json",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["items"]
+
+
+def test_in_repository_memory_override_must_be_ignored(
+    architecture_repo: Path,
+) -> None:
+    from architecture_graph.corpus import MemoryNotIgnoredError
+
+    memory = architecture_repo / "var" / "architecture-memory"
+    with pytest.raises(MemoryNotIgnoredError, match="var/architecture-memory"):
+        index_corpus((architecture_repo,), memory_root=memory)
+    assert not memory.exists()
+
+
 def test_recoverable_scalar_failure_marks_source_partial(
     phase1_repository: Path, tmp_path: Path
 ) -> None:
@@ -1235,7 +1278,7 @@ def test_explicit_config_cli_failure_is_stderr_only_and_preserves_pointer(
     captured = capsys.readouterr()
     assert captured.out == ""
     if json_mode:
-        assert json.loads(captured.err)["error"]["code"] == "invalid_request"
+        assert json.loads(captured.err)["error"]["code"] == "invalid_configuration"
     else:
         assert captured.err.startswith("architecture-graph: configuration ")
     assert "Traceback" not in captured.err
@@ -1320,7 +1363,7 @@ def test_unwritable_memory_root_is_stderr_only_and_preserves_pointer(
     if json_mode:
         assert json.loads(captured.err)["error"]["code"] == "permission_denied"
     else:
-        assert "simulated unwritable memory root" in captured.err
+        assert "permission denied during filesystem operation" in captured.err
     assert len(captured.err.splitlines()) == 1
     assert project.current_path.read_bytes() == pointer_before
 

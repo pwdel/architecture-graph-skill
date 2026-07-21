@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -25,6 +25,7 @@ from architecture_graph.config import (
 from architecture_graph.corpus import (
     CorpusSelection,
     check_default_memory_ignored,
+    check_memory_ignored,
     resolve_corpus,
     write_corpus_metadata,
 )
@@ -894,6 +895,22 @@ def index_corpus(
     selection = resolve_corpus(
         paths, configuration_identity(repository, config_path)
     )
+    if memory_root is not None:
+        check_memory_ignored(selection, memory_root)
+    elif os.environ.get("ARCHITECTURE_GRAPH_MEMORY_ROOT"):
+        check_memory_ignored(
+            selection, Path(os.environ["ARCHITECTURE_GRAPH_MEMORY_ROOT"])
+        )
+    if memory_root is not None and selection.inputs == (".",):
+        legacy = ProjectPaths.resolve(repository, memory_root)
+        if legacy.current_path.is_file():
+            result = index_repository(
+                repository,
+                memory_root=memory_root,
+                config_path=config_path,
+                observed_at=observed_at,
+            )
+            return replace(result, selection=selection)
     return index_repository(
         selection.repository,
         memory_root=memory_root,

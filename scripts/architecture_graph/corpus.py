@@ -92,6 +92,14 @@ def resolve_corpus(
 
 
 def check_default_memory_ignored(selection: CorpusSelection) -> None:
+    check_memory_ignored(selection, selection.repository / ".architecture-graph")
+
+
+def check_memory_ignored(selection: CorpusSelection, memory_root: Path) -> None:
+    resolved = memory_root.resolve()
+    if not resolved.is_relative_to(selection.repository):
+        return
+    relative = resolved.relative_to(selection.repository).as_posix() + "/"
     result = subprocess.run(
         [
             "git",
@@ -99,16 +107,16 @@ def check_default_memory_ignored(selection: CorpusSelection) -> None:
             str(selection.repository),
             "check-ignore",
             "-q",
-            ".architecture-graph/",
+            relative,
         ],
         check=False,
     )
     if result.returncode == 1:
         raise MemoryNotIgnoredError(
-            "add .architecture-graph/ to the repository .gitignore and retry"
+            f"add {relative} to the repository .gitignore and retry"
         )
     if result.returncode != 0:
-        raise RuntimeError("Git check-ignore failed for .architecture-graph/")
+        raise RuntimeError(f"Git check-ignore failed for {relative}")
 
 
 def corpus_metadata(selection: CorpusSelection) -> dict[str, object]:

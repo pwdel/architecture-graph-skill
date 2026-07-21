@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 import json
+import os
 from pathlib import Path
 import sys
 
 from architecture_graph import __version__
 from architecture_graph.canonical import canonical_dumps
 from architecture_graph.corpus import CorpusSelection, MemoryNotIgnoredError
+from architecture_graph.config import ConfigurationPathError
 from architecture_graph.errors import ArchitectureGraphError
 from architecture_graph.indexer import index_corpus
 from architecture_graph.project import ProjectPaths, RepositoryStateError
@@ -95,14 +97,28 @@ def _select_project(
     repository: Path, corpus_id: str | None, memory_root: Path | None
 ) -> ProjectPaths:
     root = repository.resolve()
-    base = memory_root.resolve() if memory_root else root / ".architecture-graph"
+    configured = os.environ.get("ARCHITECTURE_GRAPH_MEMORY_ROOT")
+    base = (
+        memory_root.resolve()
+        if memory_root
+        else Path(configured).resolve()
+        if configured
+        else root / ".architecture-graph"
+    )
     corpora = base / "corpora"
     metadata_files = sorted(corpora.glob("*/CORPUS.json")) if corpora.is_dir() else []
+    if memory_root is not None and not metadata_files:
+        legacy = ProjectPaths.resolve(root, memory_root)
+        if legacy.current_path.is_file():
+            return legacy
     if corpus_id is None:
         if not metadata_files:
             raise FileNotFoundError("architecture graph corpus not found")
         if len(metadata_files) != 1:
-            choices = ", ".join(path.parent.name for path in metadata_files)
+            choices = ", ".join(
+                f"{path.parent.name} ({', '.join(json.loads(path.read_text())['inputs'])})"
+                for path in metadata_files
+            )
             raise ValueError(f"multiple corpora found; select --corpus from: {choices}")
         selected = metadata_files[0]
     else:
@@ -110,6 +126,12 @@ def _select_project(
         if not selected.is_file():
             raise FileNotFoundError(f"corpus not found: {corpus_id}")
     raw = json.loads(selected.read_text(encoding="utf-8"))
+    if set(raw) != {"schema_version", "corpus_id", "repository", "inputs"}:
+        raise ValueError("corpus metadata has invalid shape")
+    if raw["schema_version"] != 1 or raw["corpus_id"] != selected.parent.name:
+        raise ValueError("corpus metadata identity mismatch")
+    if Path(str(raw["repository"])).resolve() != root:
+        raise ValueError("corpus metadata belongs to a different repository")
     selection = CorpusSelection(root, tuple(raw["inputs"]), str(raw["corpus_id"]))
     return ProjectPaths.for_corpus(selection, memory_root)
 
@@ -124,17 +146,40 @@ def _print_error(error: ArchitectureGraphError, as_json: bool) -> None:
 
 def _as_expected(error: Exception) -> ArchitectureGraphError:
     if isinstance(error, MemoryNotIgnoredError):
+        ignored_path = str(error).split("add ", 1)[-1].split(" to ", 1)[0]
         return ArchitectureGraphError(
-            "memory_not_ignored", str(error), ".architecture-graph/"
+            "memory_not_ignored", str(error), ignored_path
         )
+    if isinstance(error, ConfigurationPathError):
+        return ArchitectureGraphError("invalid_configuration", str(error))
     if isinstance(error, FileNotFoundError):
-        return ArchitectureGraphError("not_found", str(error))
+        message = str(error)
+        code = "snapshot_not_found" if "snapshot" in message else "corpus_not_found"
+        return ArchitectureGraphError(code, message)
     if isinstance(error, PermissionError):
-        return ArchitectureGraphError("permission_denied", str(error))
+        filename = getattr(error, "filename", None)
+        path = None if filename is None else Path(filename).name
+        return ArchitectureGraphError(
+            "permission_denied", "permission denied during filesystem operation", path
+        )
     if isinstance(error, RepositoryStateError):
         return ArchitectureGraphError("repository_state", str(error))
     if isinstance(error, KeyError):
         return ArchitectureGraphError("record_not_found", str(error))
+    message = str(error)
+    mappings = (
+        ("cursor", "invalid_cursor"),
+        ("JMESPath", "invalid_jmespath"),
+        ("multiple corpora", "ambiguous_corpus"),
+        ("corpus metadata", "invalid_corpus_metadata"),
+        ("snapshot integrity", "snapshot_integrity"),
+        ("current snapshot changed", "publication_conflict"),
+        ("same Git worktree", "cross_repository_inputs"),
+        ("unsupported explicit source", "unsupported_input"),
+    )
+    for token, code in mappings:
+        if token in message:
+            return ArchitectureGraphError(code, message)
     return ArchitectureGraphError("invalid_request", str(error))
 
 
