@@ -3,6 +3,7 @@ from architecture_graph.project import ProjectPaths
 from architecture_graph.semantic_queries import decisions_query, evidence_query, explain_query, neighbors_query, terms_query
 from architecture_graph.snapshot import SnapshotReader
 from architecture_graph.paging import page_records
+from architecture_graph.views import summarize_record
 from conftest import ignore_architecture_graph
 
 
@@ -43,3 +44,16 @@ def test_character_fitting_cursor_does_not_skip_removed_items() -> None:
     second = page_records(records, binding=binding, fields=None, limit=3, max_chars=650, cursor=first.cursor)
     assert first.items[-1]["id"] == "term:0"
     assert second.items[0]["id"] == "term:1"
+
+
+def test_term_summary_bounds_large_evidence_collections() -> None:
+    record = {
+        "id": "term:adapter", "kind": "term", "canonical_form": "adapter",
+        "tfidf": 3.5, "document_frequency": 12, "occurrence_count": 31,
+        "evidence_ids": [f"evidence:{index:04d}" for index in range(2_000)],
+        "derivation_ids": ["derivation:term"],
+    }
+    summary = summarize_record(record)
+    assert summary["evidence_count"] == 2_000
+    assert summary["top_evidence_ids"] == ["evidence:0000", "evidence:0001"]
+    assert "evidence_ids" not in summary

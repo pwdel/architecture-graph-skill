@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 
 import pytest
+from architecture_graph.errors import RecordTooLargeError
+from architecture_graph.paging import page_records
 
 from architecture_graph.indexer import index_corpus
 from architecture_graph.project import ProjectPaths
@@ -113,3 +115,13 @@ def test_malformed_cursor_and_jmespath_are_user_errors() -> None:
         find_snapshot_records(Reader(), "segments", cursor="not-base64")
     with pytest.raises(ValueError, match="JMESPath"):
         find_snapshot_records(Reader(), "segments", expression="[")
+
+
+def test_oversized_first_record_is_an_explicit_error() -> None:
+    with pytest.raises(RecordTooLargeError) as raised:
+        page_records(
+            [{"id": "term:oversized", "text": "x" * 5_000}],
+            binding={"command": "terms"}, fields=None, limit=1, max_chars=100,
+        )
+    assert raised.value.record_id == "term:oversized"
+    assert raised.value.minimum_chars > 100

@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 
 from architecture_graph.query import QueryEnvelope, _cursor, _project, _read_cursor, render_query_envelope
 from architecture_graph.records import JSONValue, Record
+from architecture_graph.errors import RecordTooLargeError
 
 
 def page_records(records: Sequence[Record], *, binding: Mapping[str, object], fields: Sequence[str] | None, limit: int, max_chars: int, cursor: str | None = None) -> QueryEnvelope:
@@ -20,4 +21,9 @@ def page_records(records: Sequence[Record], *, binding: Mapping[str, object], fi
         except ValueError:
             if not selected:
                 raise
+            if len(selected) == 1:
+                record_id = str(selected[0].get("id", "unknown"))
+                probe = QueryEnvelope(tuple(selected), truncated=bool(len(records) - offset - 1), omitted_count=max(0, len(records) - offset - 1), cursor=None, max_chars=10**9)
+                minimum_chars = len(render_query_envelope(probe, "json"))
+                raise RecordTooLargeError(record_id, max_chars, minimum_chars)
             selected.pop()
