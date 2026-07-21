@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
 import subprocess
 
-from architecture_graph.canonical import canonical_bytes, sha256_digest
+from architecture_graph.canonical import atomic_write_json, canonical_bytes, sha256_digest
 from architecture_graph.project import normalize_remote
 
 
@@ -14,6 +16,10 @@ class CorpusSelection:
     repository: Path
     inputs: tuple[str, ...]
     corpus_id: str
+
+
+class MemoryNotIgnoredError(RuntimeError):
+    pass
 
 
 def find_git_worktree(path: Path) -> Path:
@@ -83,3 +89,48 @@ def resolve_corpus(
         )
     )
     return CorpusSelection(repository, inputs, digest.removeprefix("sha256:"))
+
+
+def check_default_memory_ignored(selection: CorpusSelection) -> None:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(selection.repository),
+            "check-ignore",
+            "-q",
+            ".architecture-graph/",
+        ],
+        check=False,
+    )
+    if result.returncode == 1:
+        raise MemoryNotIgnoredError(
+            "add .architecture-graph/ to the repository .gitignore and retry"
+        )
+    if result.returncode != 0:
+        raise RuntimeError("Git check-ignore failed for .architecture-graph/")
+
+
+def corpus_metadata(selection: CorpusSelection) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "corpus_id": selection.corpus_id,
+        "repository": selection.repository.as_posix(),
+        "inputs": list(selection.inputs),
+    }
+
+
+def write_corpus_metadata(project, selection: CorpusSelection) -> None:
+    if project.corpus_file.exists():
+        validate_corpus_metadata(project, selection)
+        return
+    atomic_write_json(project.corpus_file, corpus_metadata(selection))
+
+
+def validate_corpus_metadata(project, selection: CorpusSelection) -> None:
+    try:
+        actual = json.loads(project.corpus_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("corpus metadata is unreadable") from error
+    if actual != corpus_metadata(selection):
+        raise ValueError("corpus metadata does not match selection")

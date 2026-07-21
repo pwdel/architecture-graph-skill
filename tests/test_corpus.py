@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from architecture_graph.corpus import resolve_corpus
+from architecture_graph.corpus import (
+    MemoryNotIgnoredError,
+    check_default_memory_ignored,
+    resolve_corpus,
+    validate_corpus_metadata,
+    write_corpus_metadata,
+)
+from architecture_graph.project import ProjectPaths
 
 
 def test_corpus_normalizes_order_overlap_and_content_changes(
@@ -41,3 +48,36 @@ def test_corpus_rejects_cross_repository_and_missing_paths(
         resolve_corpus([architecture_repo, foreign], "config:one")
     with pytest.raises(ValueError, match="does not exist"):
         resolve_corpus([architecture_repo / "missing.json"], "config:one")
+
+
+def test_default_memory_is_corpus_scoped_and_requires_ignore(
+    architecture_repo: Path,
+) -> None:
+    selection = resolve_corpus([architecture_repo], "config:one")
+    with pytest.raises(MemoryNotIgnoredError, match=".architecture-graph/"):
+        check_default_memory_ignored(selection)
+    assert not (architecture_repo / ".architecture-graph").exists()
+
+
+def test_memory_precedence_and_metadata_round_trip(
+    architecture_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from conftest import ignore_architecture_graph
+
+    ignore_architecture_graph(architecture_repo)
+    selection = resolve_corpus([architecture_repo], "config:one")
+    default = ProjectPaths.for_corpus(selection)
+    assert default.project_dir == (
+        architecture_repo / ".architecture-graph" / "corpora" / selection.corpus_id
+    )
+    monkeypatch.setenv("ARCHITECTURE_GRAPH_MEMORY_ROOT", str(tmp_path / "env"))
+    assert ProjectPaths.for_corpus(selection).projects_root == tmp_path / "env" / "corpora"
+    explicit = ProjectPaths.for_corpus(selection, tmp_path / "cli")
+    assert explicit.projects_root == tmp_path / "cli" / "corpora"
+    write_corpus_metadata(explicit, selection)
+    before = explicit.corpus_file.read_bytes()
+    validate_corpus_metadata(explicit, selection)
+    changed = resolve_corpus([architecture_repo], "config:two")
+    with pytest.raises(ValueError, match="corpus metadata"):
+        validate_corpus_metadata(explicit, changed)
+    assert explicit.corpus_file.read_bytes() == before
