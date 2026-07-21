@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -16,9 +17,16 @@ from architecture_graph.canonical import (
 from architecture_graph.config import (
     ConfigurationPathError,
     ProjectConfig,
+    configuration_identity,
     configuration_digest,
     load_config,
     resolve_config_path,
+)
+from architecture_graph.corpus import (
+    CorpusSelection,
+    check_default_memory_ignored,
+    resolve_corpus,
+    write_corpus_metadata,
 )
 from architecture_graph.fingerprint import pipeline_fingerprint
 from architecture_graph.ingest import IngestionContext, IngestionResult, ingest_sources
@@ -60,9 +68,18 @@ class IndexResult:
     source_count: int
     segment_count: int
     warning_count: int
+    selection: CorpusSelection | None = None
+
+    @property
+    def corpus_id(self) -> str | None:
+        return None if self.selection is None else self.selection.corpus_id
 
     def as_json(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload.pop("selection", None)
+        if self.corpus_id is not None:
+            payload["corpus_id"] = self.corpus_id
+        return payload
 
 
 def _source_metadata(ingestion: IngestionResult) -> dict[str, dict[str, object]]:
@@ -623,6 +640,7 @@ def _repository_capture(
     repository: Path,
     config_path: Path | None,
     observed_at: str | None,
+    selected_paths: Sequence[str] = (".",),
 ) -> RepositoryCapture:
     selected_config, explicit = resolve_config_path(repository, config_path)
     try:
@@ -632,7 +650,7 @@ def _repository_capture(
     except ValueError as error:
         raise ConfigurationPathError(f"invalid configuration: {error}") from error
     try:
-        inputs = tuple(discover_sources(repository, config))
+        inputs = tuple(discover_sources(repository, config, selected_paths))
     except ValueError as error:
         raise RepositoryStateError(f"cannot capture repository sources: {error}") from error
     except (OSError, subprocess.CalledProcessError) as error:
@@ -685,9 +703,10 @@ def _stable_repository_capture(
     repository: Path,
     config_path: Path | None,
     observed_at: str | None,
+    selected_paths: Sequence[str] = (".",),
 ) -> RepositoryCapture:
-    first = _repository_capture(repository, config_path, observed_at)
-    second = _repository_capture(repository, config_path, observed_at)
+    first = _repository_capture(repository, config_path, observed_at, selected_paths)
+    second = _repository_capture(repository, config_path, observed_at, selected_paths)
     if first.token != second.token:
         raise RepositoryStateError("repository changed while inputs were captured")
     return second
@@ -698,8 +717,11 @@ def _prepublication_observation(
     config_path: Path | None,
     observed_at: str | None,
     expected_token: str,
+    selected_paths: Sequence[str] = (".",),
 ) -> dict[str, object]:
-    final = _stable_repository_capture(repository, config_path, observed_at)
+    final = _stable_repository_capture(
+        repository, config_path, observed_at, selected_paths
+    )
     if final.token != expected_token:
         raise RepositoryStateError("repository changed during indexing")
     return final.observation
@@ -711,13 +733,27 @@ def index_repository(
     memory_root: Path | None = None,
     config_path: Path | None = None,
     observed_at: str | None = None,
+    _selection: CorpusSelection | None = None,
 ) -> IndexResult:
-    repository = root.resolve()
-    capture = _stable_repository_capture(repository, config_path, observed_at)
+    repository = root.resolve() if _selection is None else _selection.repository
+    selected_paths = (".",) if _selection is None else _selection.inputs
+    if _selection is not None and memory_root is None and not os.environ.get(
+        "ARCHITECTURE_GRAPH_MEMORY_ROOT"
+    ):
+        check_default_memory_ignored(_selection)
+    project = (
+        ProjectPaths.resolve(repository, memory_root)
+        if _selection is None
+        else ProjectPaths.for_corpus(_selection, memory_root)
+    )
+    if _selection is not None:
+        write_corpus_metadata(project, _selection)
+    capture = _stable_repository_capture(
+        repository, config_path, observed_at, selected_paths
+    )
     config = capture.config
     inputs = capture.inputs
     config_digest = configuration_digest(config)
-    project = ProjectPaths.resolve(repository, memory_root)
     pipeline = pipeline_fingerprint()
     pipeline_digest = pipeline.digest
     context = IngestionContext(
@@ -754,7 +790,7 @@ def index_repository(
 
     if _selected_material_is_fresh(current, material_digest):
         git_observation = _prepublication_observation(
-            repository, config_path, observed_at, capture.token
+            repository, config_path, observed_at, capture.token, selected_paths
         )
         published = observe_existing_snapshot(
             project, current, git_observation, current.snapshot_id
@@ -766,6 +802,7 @@ def index_repository(
             source_count=sum(1 for _ in current.iter("sources")),
             segment_count=sum(1 for _ in current.iter("segments")),
             warning_count=sum(1 for _ in current.iter("warnings")),
+            selection=_selection,
         )
 
     input_digest = sha256_digest(
@@ -823,7 +860,7 @@ def index_repository(
         report=_report(sources, ingestion),
     )
     git_observation = _prepublication_observation(
-        repository, config_path, observed_at, capture.token
+        repository, config_path, observed_at, capture.token, selected_paths
     )
     published = publish_snapshot(
         project,
@@ -838,4 +875,29 @@ def index_repository(
         source_count=len(sources),
         segment_count=len(ingestion.segments),
         warning_count=len(ingestion.warnings),
+        selection=_selection,
+    )
+
+
+def index_corpus(
+    paths: Sequence[Path],
+    *,
+    memory_root: Path | None = None,
+    config_path: Path | None = None,
+    observed_at: str | None = None,
+) -> IndexResult:
+    if not paths:
+        raise ValueError("at least one corpus input is required")
+    from architecture_graph.corpus import find_git_worktree
+
+    repository = find_git_worktree(paths[0])
+    selection = resolve_corpus(
+        paths, configuration_identity(repository, config_path)
+    )
+    return index_repository(
+        selection.repository,
+        memory_root=memory_root,
+        config_path=config_path,
+        observed_at=observed_at,
+        _selection=selection,
     )

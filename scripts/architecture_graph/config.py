@@ -167,6 +167,23 @@ def configuration_digest(config: ProjectConfig) -> str:
     return sha256_digest(canonical_bytes(config.as_digest_input()))
 
 
+def configuration_identity(root: Path, config_path: Path | None = None) -> str:
+    selected, explicit = resolve_config_path(root, config_path)
+    text = _configuration_text(selected, explicit=explicit)
+    return sha256_digest(
+        canonical_bytes(
+            {
+                "path": (
+                    selected.relative_to(root.resolve()).as_posix()
+                    if selected.is_relative_to(root.resolve())
+                    else selected.as_posix()
+                ),
+                "content": text,
+            }
+        )
+    )
+
+
 def resolve_config_path(
     root: Path, config_path: Path | None
 ) -> tuple[Path, bool]:

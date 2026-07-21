@@ -23,6 +23,7 @@ from architecture_graph.indexer import (
     _selected_observation_commit,
     index_repository,
 )
+from architecture_graph.indexer import index_corpus
 from architecture_graph.project import ProjectPaths, RepositoryStateError
 from architecture_graph.records import finalize_record
 from architecture_graph.snapshot import SnapshotReader, publish_snapshot
@@ -67,6 +68,39 @@ def test_index_publishes_every_phase1_payload(
         "docs/adr/ADR-001-events.md",
     }:
         assert report.count(f"- `{path}`:") == 1
+
+
+def test_index_corpus_indexes_explicit_design_json(architecture_repo: Path) -> None:
+    from conftest import git, ignore_architecture_graph
+
+    plan = architecture_repo / "lib" / "design" / "design-plan.json"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(
+        '{"title":"Plan","decision_log":[{"status":"accepted",'
+        '"decision":"backend owns truth"}],"risks":["drift"]}'
+    )
+    git(architecture_repo, "add", "lib/design/design-plan.json")
+    git(architecture_repo, "commit", "-m", "add design plan")
+    ignore_architecture_graph(architecture_repo)
+    result = index_corpus((plan,))
+    project = ProjectPaths.for_corpus(result.selection)
+    reader = SnapshotReader.open(project)
+    assert result.corpus_id == result.selection.corpus_id
+    assert [item["path"] for item in reader.iter("sources")] == [
+        "lib/design/design-plan.json"
+    ]
+    assert any(
+        item["metadata"].get("json_pointer") == "/decision_log/0/status"
+        for item in reader.iter("segments")
+    )
+
+
+def test_index_corpus_requires_ignore_before_writing(architecture_repo: Path) -> None:
+    from architecture_graph.corpus import MemoryNotIgnoredError
+
+    with pytest.raises(MemoryNotIgnoredError):
+        index_corpus((architecture_repo,))
+    assert not (architecture_repo / ".architecture-graph").exists()
 
 
 def test_recoverable_scalar_failure_marks_source_partial(
