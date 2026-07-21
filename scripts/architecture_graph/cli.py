@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--cursor")
     commands.choices["neighbors"].add_argument("--node", required=True)
     commands.choices["neighbors"].add_argument("--depth", type=int, default=1)
-    commands.choices["decisions"].add_argument("--score", choices=("navigation", "criticality", "review_priority", "extraction_confidence"), default="navigation")
+    commands.choices["decisions"].add_argument("--score", choices=("navigation", "criticality", "review_priority", "extraction_confidence", "corroboration", "completeness"), default="navigation")
     commands.choices["evidence"].add_argument("--for", dest="record_id", required=True)
     commands.choices["explain"].add_argument("--id", dest="record_id", required=True)
     return parser

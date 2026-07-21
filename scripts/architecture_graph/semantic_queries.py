@@ -23,7 +23,7 @@ def terms_query(reader: SnapshotReader, *, fields: Sequence[str] | None = None, 
 
 
 def decisions_query(reader: SnapshotReader, *, score: str = "navigation", fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
-    if score not in {"navigation", "criticality", "review_priority", "extraction_confidence"}: raise ValueError("invalid score")
+    if score not in {"navigation", "criticality", "review_priority", "extraction_confidence", "corroboration", "completeness"}: raise ValueError("invalid score")
     rankings = {str(x["node_id"]): x for x in reader.iter("rankings")}
     records = []
     for decision in reader.iter("decisions"):
@@ -58,7 +58,15 @@ def explain_query(reader: SnapshotReader, *, record_id: str, fields: Sequence[st
     catalog = _catalog(reader)
     record = catalog.get(record_id)
     rankings = [dict(x) for x in catalog.iter("ranking") if x.get("node_id") == record_id]
-    evidence = [dict(catalog.get(str(item))) for item in record.get("evidence_ids", [])[:limit]]
-    derivations = [dict(catalog.get(str(item))) for item in record.get("derivation_ids", []) if catalog.maybe_get(str(item))]
-    item: Record = {"id": "explanation:" + record_id, "kind": "explanation", "record": dict(record), "rankings": rankings, "evidence": evidence, "derivations": derivations, "evidence_ids": list(record.get("evidence_ids", [])), "derivation_ids": list(record.get("derivation_ids", []))}
+    evidence = []
+    for evidence_id in record.get("evidence_ids", [])[: min(limit, 2)]:
+        source = catalog.get(str(evidence_id))
+        evidence.append({"id": source["id"], "path": source.get("path"), "span": source.get("span"), "text": str(source.get("text", ""))[:240]})
+    derivations = []
+    for derivation_id in record.get("derivation_ids", [])[: min(limit, 4)]:
+        source = catalog.maybe_get(str(derivation_id))
+        if source:
+            derivations.append({"id": source["id"], "method": source.get("method"), "producer_kind": source.get("producer_kind")})
+    scores = rankings[0].get("scores", {}) if rankings else {}
+    item: Record = {"id": "explanation:" + record_id, "kind": "explanation", "record_summary": summarize_record(dict(record), {record_id: rankings[0]} if rankings else None), "scores": scores, "evidence_count": len(record.get("evidence_ids", [])), "representative_evidence": evidence, "derivation_count": len(record.get("derivation_ids", [])), "representative_derivations": derivations}
     return page_records([item], binding={"snapshot_id": reader.snapshot_id, "command": "explain", "record_id": record_id, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=1, max_chars=max_chars, cursor=cursor)

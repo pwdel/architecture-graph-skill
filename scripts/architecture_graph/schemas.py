@@ -12,7 +12,7 @@ from architecture_graph.records import Record, content_digest
 
 NODE_TYPES = frozenset({"source", "segment", "evidence", "term", "entity", "claim", "decision", "warning", "derivation"})
 EDGE_TYPES = frozenset({"CONTAINS", "MENTIONS", "ASSERTS", "SUBJECT_OF", "OBJECT_OF", "SUPPORTS", "CONTRADICTS", "QUALIFIES", "DERIVED_FROM", "RELATED_TO"})
-SCORE_TYPES = frozenset({"navigation", "criticality", "review_priority", "extraction_confidence"})
+SCORE_TYPES = frozenset({"navigation", "criticality", "review_priority", "extraction_confidence", "corroboration", "completeness"})
 
 REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "term": frozenset({"canonical_form", "observed_forms", "term_kind", "distinct_source_count", "document_frequency", "tfidf", "discovery_signals", "evidence_ids", "derivation_ids"}),
@@ -109,7 +109,7 @@ def validate_typed_record(record: Mapping[str, object], expected_kind: str | Non
     if kind == "ranking" and isinstance(record.get("scores"), Mapping):
         scores = record["scores"]
         if set(scores) != SCORE_TYPES:
-            issues.append(ValidationIssue("scores", "must contain four independent scores"))
+            issues.append(ValidationIssue("scores", "must contain all independent scores"))
         for name, payload in scores.items():
             value = payload.get("score") if isinstance(payload, Mapping) else None
             if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:

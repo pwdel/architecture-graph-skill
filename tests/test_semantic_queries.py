@@ -22,7 +22,9 @@ def test_semantic_queries_return_bounded_source_backed_records(phase1_repository
     evidence = evidence_query(reader, record_id=decision_id, limit=5, max_chars=12_000)
     explanation = explain_query(reader, record_id=decision_id, limit=20, max_chars=12_000)
     assert evidence.items[0]["path"]
-    assert explanation.items[0]["record"]["id"] == decision_id
+    assert explanation.items[0]["record_summary"]["id"] == decision_id
+    assert "record" not in explanation.items[0]
+    assert set(explanation.items[0]["scores"]) >= {"navigation", "criticality", "corroboration", "completeness"}
 
 
 def test_neighbors_obey_depth_and_include_evidence(phase1_repository) -> None:

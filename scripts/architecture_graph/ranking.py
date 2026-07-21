@@ -69,8 +69,16 @@ def rank_graph(graph: GraphResult, catalog: RecordCatalog) -> RankingResult:
         required = node.get("kind") == "claim" and (node.get("qualifiers") or {}).get("modality") == "required"
         critical_features = {"required_modality": 1.0 if required else 0.0, "evidence_breadth": min(1.0, len(hashes) / 3)}
         review_features = {"missing_rationale": 1.0 if node.get("kind") == "decision" and not node.get("rationale_evidence_ids") else 0.0, "contradiction": 1.0 if node.get("contradicting_claim_ids") else 0.0}
-        confidence_features = {"tuple_completeness": 1.0 if node.get("kind") != "claim" or node.get("tuple_complete") else 0.0, "explicit_structure": 1.0 if node.get("kind") in {"source", "segment", "evidence"} else 0.7}
-        vectors = {"navigation": navigation_features, "criticality": critical_features, "review_priority": review_features, "extraction_confidence": confidence_features}
+        anchor = str(node.get("anchor_kind", ""))
+        explicit_structure = 1.0 if node.get("kind") in {"source", "segment", "evidence"} or anchor == "structured_parent" else 0.8 if anchor == "decision_heading" else 0.7
+        confidence_features = {"tuple_completeness": 1.0 if node.get("kind") != "claim" or node.get("tuple_complete") else 0.0, "explicit_structure": explicit_structure}
+        corroboration_features = {"distinct_content_hashes": min(1.0, len(hashes) / 3)}
+        if node.get("kind") == "decision":
+            fields = node.get("field_roles", {})
+            completeness_features = {role: 1.0 if role in fields else 0.0 for role in ("title", "decision", "status", "rationale", "consequences", "scope")}
+        else:
+            completeness_features = {"record_complete": 1.0}
+        vectors = {"navigation": navigation_features, "criticality": critical_features, "review_priority": review_features, "extraction_confidence": confidence_features, "corroboration": corroboration_features, "completeness": completeness_features}
         scores = {}
         for name, features in vectors.items():
             score = sum(features.values()) / max(1, len(features))
