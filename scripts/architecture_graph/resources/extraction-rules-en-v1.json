@@ -1,0 +1,1 @@
+{"schema_version":1,"modalities":{"required":["must","shall","required"],"proposed":["may","might","propose","proposed"],"asserted":[]},"negative_markers":["not","never","no"],"sentence_terminators":[".","!","?"],"max_sentence_chars":2000}

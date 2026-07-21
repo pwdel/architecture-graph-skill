@@ -9,6 +9,7 @@ import sys
 
 from architecture_graph import __version__
 from architecture_graph.canonical import canonical_dumps
+from architecture_graph.capabilities import capability_record
 from architecture_graph.corpus import CorpusSelection, MemoryNotIgnoredError
 from architecture_graph.config import ConfigurationPathError
 from architecture_graph.errors import ArchitectureGraphError
@@ -28,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="architecture-graph")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command")
+
+    capabilities = commands.add_parser(
+        "capabilities", help="show implemented phases and commands"
+    )
+    capabilities.add_argument("--json", action="store_true")
 
     index = commands.add_parser("index", help="build a deterministic snapshot")
     index.add_argument("paths", type=Path, nargs="+")
@@ -191,6 +197,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     as_json = bool(getattr(args, "json", False))
     try:
+        if args.command == "capabilities":
+            payload = capability_record()
+            if as_json:
+                print(canonical_dumps(payload))
+            else:
+                print("Architecture Graph phase1, phase2")
+                print("Commands: " + ", ".join(payload["commands"]))
+            return 0
         if args.command == "index":
             result = index_corpus(
                 args.paths,

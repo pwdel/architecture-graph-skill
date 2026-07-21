@@ -28,6 +28,9 @@ version = {attr = "architecture_graph.__version__"}
 [tool.setuptools.packages.find]
 where = ["scripts"]
 
+[tool.setuptools.package-data]
+architecture_graph = ["resources/*.json"]
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 pythonpath = ["scripts"]
