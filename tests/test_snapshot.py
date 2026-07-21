@@ -134,6 +134,14 @@ def test_snapshot_validation_rejects_malformed_or_dangling_semantic_references(t
         SnapshotFinalizer(project, invalid).validate()
 
 
+def test_snapshot_validation_rejects_wrong_kind_semantic_reference(tmp_path: Path) -> None:
+    term = finalize_record({"id": "term:broken", "kind": "term", "canonical_form": "broken", "observed_forms": ["broken"], "term_kind": "noun_phrase", "distinct_source_count": 1, "document_frequency": 1, "tfidf": 1.0, "discovery_signals": ["tfidf"], "evidence_ids": ["source:docs/adr/ADR-001.md"], "derivation_ids": ["derivation:source-manifest"]})
+    invalid = changed_bundle(bundle(), schema_versions={"snapshot": 1, "records": 1, "semantic": 1}, records_by_type={**bundle().records_by_type, "terms": [term]})
+    project = ProjectPaths.resolve(tmp_path, tmp_path / "memory")
+    with pytest.raises(ValueError, match="wrong kind source"):
+        SnapshotFinalizer(project, invalid).validate()
+
+
 def reidentify_snapshot(
     snapshot_dir: Path, manifest: dict[str, object]
 ) -> tuple[str, Path]:

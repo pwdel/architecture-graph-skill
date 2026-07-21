@@ -130,6 +130,7 @@ def validate_typed_record(record: Mapping[str, object], expected_kind: str | Non
 def validate_snapshot_references(records_by_type: Mapping[str, Sequence[Record]]) -> tuple[ValidationIssue, ...]:
     records = [record for group in records_by_type.values() for record in group]
     ids = {str(record["id"]) for record in records}
+    kinds = {str(record["id"]): str(record["kind"]) for record in records}
     issues: list[ValidationIssue] = []
     for record in records:
         for field in ("evidence_ids", "derivation_ids"):
@@ -140,15 +141,21 @@ def validate_snapshot_references(records_by_type: Mapping[str, Sequence[Record]]
             for reference in value:
                 if reference not in ids:
                     issues.append(ValidationIssue(field, f"missing reference {reference}"))
+                elif kinds[reference] != ("evidence" if field == "evidence_ids" else "derivation"):
+                    issues.append(ValidationIssue(field, f"reference {reference} has wrong kind {kinds[reference]}"))
         if record.get("kind") == "edge":
             for field in ("from_id", "to_id"):
                 if record.get(field) not in ids:
                     issues.append(ValidationIssue(field, f"missing reference {record.get(field)}"))
+                elif kinds[str(record.get(field))] not in NODE_TYPES:
+                    issues.append(ValidationIssue(field, f"reference {record.get(field)} is not a graph node"))
         if record.get("kind") == "claim":
             for field in ("subject", "object"):
                 argument = record.get(field)
                 if isinstance(argument, Mapping) and argument.get("kind") == "entity_ref" and argument.get("entity_id") not in ids:
                     issues.append(ValidationIssue(field + ".entity_id", f"missing reference {argument.get('entity_id')}"))
+                elif isinstance(argument, Mapping) and argument.get("kind") == "entity_ref" and kinds.get(str(argument.get("entity_id"))) != "entity":
+                    issues.append(ValidationIssue(field + ".entity_id", f"reference {argument.get('entity_id')} is not an entity"))
         if record.get("kind") == "decision":
             for field in ("claim_ids", "rationale_evidence_ids", "consequence_evidence_ids", "supporting_claim_ids", "contradicting_claim_ids"):
                 value = record.get(field, [])
@@ -158,6 +165,12 @@ def validate_snapshot_references(records_by_type: Mapping[str, Sequence[Record]]
                 for reference in value:
                     if reference not in ids:
                         issues.append(ValidationIssue(field, f"missing reference {reference}"))
+                    else:
+                        expected = "claim" if field in {"claim_ids", "supporting_claim_ids", "contradicting_claim_ids"} else "evidence"
+                        if kinds[reference] != expected:
+                            issues.append(ValidationIssue(field, f"reference {reference} has wrong kind {kinds[reference]}"))
         if record.get("kind") == "ranking" and record.get("node_id") not in ids:
             issues.append(ValidationIssue("node_id", f"missing reference {record.get('node_id')}"))
+        elif record.get("kind") == "ranking" and kinds.get(str(record.get("node_id"))) not in NODE_TYPES:
+            issues.append(ValidationIssue("node_id", f"reference {record.get('node_id')} is not a graph node"))
     return tuple(sorted(issues))
