@@ -1,6 +1,6 @@
 from architecture_graph.ranking import rank_graph
 from architecture_graph.semantic_graph import build_evidence_graph
-from tests.helpers.phase2_catalog import claimed_catalog
+from helpers.phase2_catalog import claimed_catalog
 
 
 def test_rankings_contain_four_independent_explainable_scores() -> None:

@@ -16,22 +16,27 @@ class DecisionResult:
 
 
 def reduce_decisions(catalog: RecordCatalog, graph: GraphResult) -> DecisionResult:
-    records = []
+    grouped: dict[tuple[str, tuple[str, ...]], list[Record]] = {}
     derivations = []
     for claim in catalog.iter("claim"):
         scope = (claim.get("qualifiers") or {}).get("scope", [])
         if not any(str(part).casefold() in {"decision", "decisions", "architecture decision"} for part in scope):
             continue
-        evidence_ids = [str(x) for x in claim["evidence_ids"]]
+        title = f"{claim['subject']['surface']} {claim['predicate']} {claim['object']['surface']}"
+        grouped.setdefault((title, tuple(str(x) for x in scope)), []).append(claim)
+    records = []
+    for (title, scope), claims in sorted(grouped.items()):
+        claim = claims[0]
+        evidence_ids = sorted({str(e) for item in claims for e in item["evidence_ids"]})
         evidence = catalog.get(evidence_ids[0])
         source = catalog.get(str(evidence["source_version_id"]))
         status = str((source.get("adr_metadata") or {}).get("status", "unknown")).casefold()
         if status not in {"accepted", "proposed", "deprecated", "superseded", "rejected"}: status = "unknown"
         applicability = "current" if status == "accepted" else "proposed" if status == "proposed" else "historical" if status in {"deprecated", "superseded", "rejected"} else "unknown"
-        title = f"{claim['subject']['surface']} {claim['predicate']} {claim['object']['surface']}"
-        derivation = build_analysis_derivation("decision_reducer", (str(claim["id"]),), "decision", title)
+        claim_ids = sorted(str(item["id"]) for item in claims)
+        derivation = build_analysis_derivation("decision_reducer", claim_ids, "decision", title)
         derivations.append(derivation)
-        records.append(finalize_record({"id": stable_id("decision", title.casefold(), scope), "kind": "decision", "title": title, "status": status, "applicability": applicability, "scope": list(scope), "claim_ids": [claim["id"]], "rationale_evidence_ids": [], "consequence_evidence_ids": [], "supporting_claim_ids": [claim["id"]], "contradicting_claim_ids": [], "diagnostic_codes": ["missing_rationale"], "evidence_ids": evidence_ids, "derivation_ids": [derivation["id"]]}))
+        records.append(finalize_record({"id": stable_id("decision", title.casefold(), scope), "kind": "decision", "title": title, "status": status, "applicability": applicability, "scope": list(scope), "claim_ids": claim_ids, "rationale_evidence_ids": [], "consequence_evidence_ids": [], "supporting_claim_ids": claim_ids, "contradicting_claim_ids": [], "diagnostic_codes": ["missing_rationale"], "evidence_ids": evidence_ids, "derivation_ids": [derivation["id"]]}))
     return DecisionResult(tuple(sorted(records, key=lambda x: str(x["id"]))), (), tuple(derivations))
 
 

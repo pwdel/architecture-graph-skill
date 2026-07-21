@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from architecture_graph.canonical import stable_id
-from architecture_graph.records import JSONValue, Record, finalize_record
+from architecture_graph.records import JSONValue, RECORD_KIND_BY_TYPE, Record, finalize_record
 
 
 @dataclass(frozen=True)
@@ -105,9 +105,11 @@ class RecordCatalog:
         return tuple(self._records.values())
 
     def records_by_type(self) -> dict[str, tuple[Record, ...]]:
+        type_by_kind = {kind: record_type for record_type, kind in RECORD_KIND_BY_TYPE.items()}
         result: dict[str, list[Record]] = {}
         for record in self._records.values():
-            result.setdefault(str(record["kind"]) + "s", []).append(record)
+            kind = str(record["kind"])
+            result.setdefault(type_by_kind.get(kind, kind + "s"), []).append(record)
         return {key: tuple(value) for key, value in sorted(result.items())}
 
 

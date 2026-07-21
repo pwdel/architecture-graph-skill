@@ -1,5 +1,5 @@
 from architecture_graph.semantic_graph import bounded_neighbors, build_evidence_graph
-from tests.helpers.phase2_catalog import claimed_catalog
+from helpers.phase2_catalog import claimed_catalog
 
 
 def test_every_graph_edge_has_provenance_and_valid_endpoints() -> None:

@@ -1,5 +1,5 @@
 from architecture_graph.nlp import normalize_evidence, parse_evidence
-from tests.helpers.phase2_catalog import semantic_catalog
+from helpers.phase2_catalog import semantic_catalog
 
 
 def test_normalized_prose_retains_source_and_span() -> None:

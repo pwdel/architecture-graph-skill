@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 
 from architecture_graph import __version__
+from architecture_graph.analysis import analyze_catalog
+from architecture_graph.analysis_types import RecordCatalog
 from architecture_graph.canonical import (
     canonical_bytes,
     sha256_digest,
@@ -40,6 +42,7 @@ from architecture_graph.project import (
     capture_git_observation,
 )
 from architecture_graph.records import (
+    RECORD_KIND_BY_TYPE,
     Record,
     finalize_record,
     validate_record,
@@ -843,6 +846,14 @@ def index_repository(
         "evidence": ingestion.evidence,
         "derivations": all_derivations,
         "warnings": ingestion.warnings,
+    }
+    phase1_catalog = RecordCatalog.from_records(
+        record for records in records_by_type.values() for record in records
+    )
+    analyzed = analyze_catalog(phase1_catalog).records_by_type()
+    records_by_type = {
+        record_type: analyzed.get(record_type, ())
+        for record_type in RECORD_KIND_BY_TYPE
     }
     bundle = SnapshotBundle(
         snapshot_kind="deterministic",

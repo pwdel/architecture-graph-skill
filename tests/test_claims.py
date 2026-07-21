@@ -4,7 +4,7 @@ from architecture_graph.nlp import normalize_evidence, parse_evidence
 from architecture_graph.qualifiers import qualify_relations
 from architecture_graph.relations import extract_relation_candidates
 from architecture_graph.terms import discover_terms
-from tests.helpers.phase2_catalog import semantic_catalog
+from helpers.phase2_catalog import semantic_catalog
 
 
 def test_complete_relation_creates_source_backed_claim() -> None:

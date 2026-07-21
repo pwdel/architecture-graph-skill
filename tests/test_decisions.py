@@ -1,6 +1,6 @@
 from architecture_graph.decisions import attach_decisions, reduce_decisions
 from architecture_graph.semantic_graph import build_evidence_graph
-from tests.helpers.phase2_catalog import claimed_catalog
+from helpers.phase2_catalog import claimed_catalog
 
 
 def test_decision_reduction_preserves_status_and_source_evidence() -> None:

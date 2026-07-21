@@ -1,6 +1,6 @@
 from architecture_graph.nlp import normalize_evidence, parse_evidence
 from architecture_graph.terms import discover_terms
-from tests.helpers.phase2_catalog import semantic_catalog
+from helpers.phase2_catalog import semantic_catalog
 
 
 def test_terms_are_source_backed_and_ranked() -> None:
