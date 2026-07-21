@@ -32,3 +32,24 @@ def semantic_catalog() -> RecordCatalog:
         }
     )
     return RecordCatalog.from_records((derivation, source, segment, evidence))
+
+
+def claimed_catalog() -> RecordCatalog:
+    from architecture_graph.claims import materialize_claims
+    from architecture_graph.entities import resolve_entities
+    from architecture_graph.nlp import normalize_evidence, parse_evidence
+    from architecture_graph.qualifiers import qualify_relations
+    from architecture_graph.relations import extract_relation_candidates
+    from architecture_graph.terms import discover_terms
+
+    base = semantic_catalog()
+    parsed = parse_evidence(normalize_evidence(base))
+    terms = discover_terms(parsed)
+    qualified = qualify_relations(extract_relation_candidates(parsed).candidates, parsed)
+    entities = resolve_entities(qualified, terms)
+    claims = materialize_claims(qualified, entities)
+    records = (
+        *base.all(), *parsed.derivations, *terms.terms, *terms.derivations,
+        *entities.entities, *entities.derivations, *claims.claims, *claims.derivations,
+    )
+    return RecordCatalog.from_records(records)
