@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-from architecture_graph.records import JSONValue, Record
+from architecture_graph.canonical import stable_id
+from architecture_graph.records import JSONValue, Record, finalize_record
 
 
 @dataclass(frozen=True)
@@ -116,3 +117,19 @@ class AnalysisResult:
 
     def records_by_type(self) -> dict[str, tuple[Record, ...]]:
         return self.catalog.records_by_type()
+
+
+def build_analysis_derivation(method: str, input_ids: Iterable[str], output_kind: str, output_key: str) -> Record:
+    inputs = tuple(sorted(set(input_ids)))
+    record_id = stable_id("derivation", "deterministic", method, inputs, output_kind, output_key)
+    return finalize_record(
+        {
+            "id": record_id, "kind": "derivation", "producer_kind": "deterministic",
+            "method": method, "tool": "architecture-graph", "tool_version": "0.3",
+            "model": None, "model_version": None, "model_artifact_digest": None,
+            "configuration_digest": "sha256:" + "0" * 64,
+            "pipeline_digest": "sha256:" + "0" * 64, "input_ids": list(inputs),
+            "output_kind": output_kind, "output_identity_key": output_key,
+            "created_at": None,
+        }
+    )

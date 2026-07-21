@@ -1,0 +1,1 @@
+"""Architecture Graph test suite."""
