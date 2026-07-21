@@ -34,6 +34,38 @@ def test_defaults_select_only_tracked_architecture_files(
     assert inputs[0].git_blob is not None
 
 
+def test_explicit_supported_file_bypasses_default_include(
+    architecture_repo: Path,
+) -> None:
+    from conftest import git
+
+    plan = architecture_repo / "lib" / "design" / "design-plan.json"
+    plan.parent.mkdir(parents=True)
+    plan.write_text('{"decision":"backend owns truth"}')
+    git(architecture_repo, "add", "lib/design/design-plan.json")
+    git(architecture_repo, "commit", "-m", "add design plan")
+    selected = discover_sources(
+        architecture_repo, ProjectConfig(), ("lib/design/design-plan.json",)
+    )
+    assert [item.relative_path for item in selected] == [
+        "lib/design/design-plan.json"
+    ]
+
+
+def test_focused_directory_applies_default_selection(
+    architecture_repo: Path,
+) -> None:
+    selected = discover_sources(architecture_repo, ProjectConfig(), ("docs",))
+    assert [item.relative_path for item in selected] == ["docs/adr/ADR-001.md"]
+
+
+def test_explicit_unsupported_file_fails(architecture_repo: Path) -> None:
+    readme = architecture_repo / "README.bin"
+    readme.write_bytes(b"binary")
+    with pytest.raises(ValueError, match="unsupported explicit source"):
+        discover_sources(architecture_repo, ProjectConfig(), ("README.bin",))
+
+
 def test_git_blob_hashes_the_selected_working_tree_bytes(
     architecture_repo: Path,
 ) -> None:

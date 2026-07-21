@@ -18,14 +18,20 @@ The current implementation is Phase 1 foundation work. It can:
 - publish immutable, content-addressed snapshots
 - track Git observation metadata without putting runtime observation data into semantic content digests
 - preserve deterministic provenance for derived records
+- accept one file, one directory, a repository, or several same-repository paths
+- keep separate corpus snapshots under project-local ignored memory
+- inspect freshness and query indexed records with bounded output
 
-The command surface currently implemented is:
+The Phase 1 command surface is:
 
 ```bash
-architecture-graph index <repo-root>
+architecture-graph memory status PATH [PATH ...] --json
+architecture-graph index PATH [PATH ...] --json
+architecture-graph find segments --repo ROOT --corpus CORPUS_ID --json
+architecture-graph get sources SOURCE_ID --repo ROOT --corpus CORPUS_ID --json
 ```
 
-Phase 2 is planned to add term discovery, SVO-style deterministic relation extraction, claim and decision reduction, graph ranking, bounded queries, engineer reports, context packs, and semantic diffs.
+Phase 2 is planned to add term discovery, SVO-style deterministic relation extraction, claim and decision reduction, graph ranking, engineer reports, context packs, and semantic diffs.
 
 ## Why This Exists
 
@@ -94,6 +100,10 @@ Index a repository containing architecture material:
 ```bash
 uv run architecture-graph index /path/to/repo --json
 ```
+
+Before the first default index, add `.architecture-graph/` to the repository's
+`.gitignore`. The CLI checks this rule before writing and never edits ignore
+files itself. Use `--memory-root` for an explicitly managed external location.
 
 By default, the indexer looks for files under common architecture and ADR paths:
 

@@ -264,6 +264,7 @@ class ProjectPaths:
     current_path: Path
     observations_path: Path
     project_file: Path
+    corpus_file: Path
     lock_path: Path
 
     @classmethod
@@ -289,5 +290,35 @@ class ProjectPaths:
             current_path=project_dir / "current.json",
             observations_path=project_dir / "observations.jsonl",
             project_file=project_dir / "PROJECT.json",
+            corpus_file=project_dir / "CORPUS.json",
+            lock_path=project_dir / ".publish.lock",
+        )
+
+    @classmethod
+    def for_corpus(
+        cls, selection, memory_root: Path | None = None
+    ) -> "ProjectPaths":
+        configured = os.environ.get("ARCHITECTURE_GRAPH_MEMORY_ROOT")
+        base = (
+            memory_root.resolve()
+            if memory_root is not None
+            else Path(configured).resolve()
+            if configured
+            else selection.repository / ".architecture-graph"
+        )
+        projects_root = base / "corpora"
+        project_dir = projects_root / selection.corpus_id
+        return cls(
+            root=selection.repository,
+            project_id=selection.corpus_id,
+            projects_root=projects_root,
+            project_dir=project_dir,
+            snapshots_dir=project_dir / "snapshots",
+            reviews_dir=project_dir / "reviews",
+            cache_dir=project_dir / "cache",
+            current_path=project_dir / "current.json",
+            observations_path=project_dir / "observations.jsonl",
+            project_file=project_dir / "PROJECT.json",
+            corpus_file=project_dir / "CORPUS.json",
             lock_path=project_dir / ".publish.lock",
         )

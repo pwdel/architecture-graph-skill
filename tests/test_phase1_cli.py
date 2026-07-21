@@ -23,6 +23,7 @@ from architecture_graph.indexer import (
     _selected_observation_commit,
     index_repository,
 )
+from architecture_graph.indexer import index_corpus
 from architecture_graph.project import ProjectPaths, RepositoryStateError
 from architecture_graph.records import finalize_record
 from architecture_graph.snapshot import SnapshotReader, publish_snapshot
@@ -67,6 +68,128 @@ def test_index_publishes_every_phase1_payload(
         "docs/adr/ADR-001-events.md",
     }:
         assert report.count(f"- `{path}`:") == 1
+
+
+def test_index_corpus_indexes_explicit_design_json(architecture_repo: Path) -> None:
+    from conftest import git, ignore_architecture_graph
+
+    plan = architecture_repo / "lib" / "design" / "design-plan.json"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(
+        '{"title":"Plan","decision_log":[{"status":"accepted",'
+        '"decision":"backend owns truth"}],"risks":["drift"]}'
+    )
+    git(architecture_repo, "add", "lib/design/design-plan.json")
+    git(architecture_repo, "commit", "-m", "add design plan")
+    ignore_architecture_graph(architecture_repo)
+    result = index_corpus((plan,))
+    project = ProjectPaths.for_corpus(result.selection)
+    reader = SnapshotReader.open(project)
+    assert result.corpus_id == result.selection.corpus_id
+    assert [item["path"] for item in reader.iter("sources")] == [
+        "lib/design/design-plan.json"
+    ]
+    assert any(
+        item["metadata"].get("json_pointer") == "/decision_log/0/status"
+        for item in reader.iter("segments")
+    )
+
+
+def test_index_corpus_requires_ignore_before_writing(architecture_repo: Path) -> None:
+    from architecture_graph.corpus import MemoryNotIgnoredError
+
+    with pytest.raises(MemoryNotIgnoredError):
+        index_corpus((architecture_repo,))
+    assert not (architecture_repo / ".architecture-graph").exists()
+
+
+def test_cli_json_ignore_error_is_actionable(
+    architecture_repo: Path, capsys
+) -> None:
+    assert main(["index", str(architecture_repo), "--json"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["error"]["code"] == "memory_not_ignored"
+    assert payload["error"]["path"] == ".architecture-graph/"
+
+
+def test_cli_index_status_find_get_workflow(architecture_repo: Path, capsys) -> None:
+    from conftest import ignore_architecture_graph
+
+    ignore_architecture_graph(architecture_repo)
+    assert main(["index", str(architecture_repo), "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    corpus_id = indexed["corpus_id"]
+    assert main(["memory", "status", str(architecture_repo), "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["items"][0]["state"] == "fresh"
+    assert main(
+        [
+            "find", "segments", "--repo", str(architecture_repo),
+            "--corpus", corpus_id, "--contains", "OrderPlaced", "--json",
+        ]
+    ) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["items"]
+    segment_id = found["items"][0]["id"]
+    assert main(
+        [
+            "get", "segments", segment_id, "--repo", str(architecture_repo),
+            "--corpus", corpus_id, "--json",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["items"][0]["id"] == segment_id
+
+
+def test_cli_query_uses_environment_memory_root(
+    architecture_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    memory = tmp_path / "memory"
+    monkeypatch.setenv("ARCHITECTURE_GRAPH_MEMORY_ROOT", str(memory))
+    assert main(["index", str(architecture_repo), "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    assert main(
+        [
+            "find", "segments", "--repo", str(architecture_repo),
+            "--corpus", indexed["corpus_id"], "--json",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["items"]
+
+
+def test_cli_reads_and_reuses_explicit_legacy_memory(
+    architecture_repo: Path, tmp_path: Path, capsys
+) -> None:
+    memory = tmp_path / "legacy-memory"
+    legacy = index_repository(architecture_repo, memory_root=memory)
+    upgraded = index_corpus((architecture_repo,), memory_root=memory)
+    assert upgraded.snapshot_id == legacy.snapshot_id
+    assert main(
+        [
+            "find", "segments", "--repo", str(architecture_repo),
+            "--memory-root", str(memory), "--json",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["items"]
+    assert main(
+        [
+            "find", "segments", "--repo", str(architecture_repo),
+            "--memory-root", str(memory), "--corpus", "missing", "--json",
+        ]
+    ) == 2
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "corpus_not_found"
+
+
+def test_in_repository_memory_override_must_be_ignored(
+    architecture_repo: Path,
+) -> None:
+    from architecture_graph.corpus import MemoryNotIgnoredError
+
+    memory = architecture_repo / "var" / "architecture-memory"
+    with pytest.raises(MemoryNotIgnoredError, match="var/architecture-memory"):
+        index_corpus((architecture_repo,), memory_root=memory)
+    assert not memory.exists()
 
 
 def test_recoverable_scalar_failure_marks_source_partial(
@@ -1161,7 +1284,10 @@ def test_explicit_config_cli_failure_is_stderr_only_and_preserves_pointer(
     assert main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.startswith("architecture-graph: configuration ")
+    if json_mode:
+        assert json.loads(captured.err)["error"]["code"] == "invalid_configuration"
+    else:
+        assert captured.err.startswith("architecture-graph: configuration ")
     assert "Traceback" not in captured.err
     assert project.current_path.read_bytes() == before
 
@@ -1178,7 +1304,10 @@ def test_non_repository_cli_failure_is_stderr_only(
     assert main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.startswith("architecture-graph: ")
+    if json_mode:
+        assert json.loads(captured.err)["error"]["code"] == "invalid_request"
+    else:
+        assert captured.err.startswith("architecture-graph: ")
     assert "Traceback" not in captured.err
     assert not (tmp_path / "memory").exists()
 
@@ -1200,7 +1329,10 @@ def test_file_valued_memory_root_is_stderr_only(
     assert main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.endswith("(NotADirectoryError)\n")
+    if json_mode:
+        assert json.loads(captured.err)["error"]["code"] == "invalid_request"
+    else:
+        assert "Not a directory" in captured.err
     assert len(captured.err.splitlines()) == 1
     assert memory_file.read_bytes() == b"sentinel"
 
@@ -1235,7 +1367,10 @@ def test_unwritable_memory_root_is_stderr_only_and_preserves_pointer(
     assert main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.endswith("(PermissionError)\n")
+    if json_mode:
+        assert json.loads(captured.err)["error"]["code"] == "permission_denied"
+    else:
+        assert "permission denied during filesystem operation" in captured.err
     assert len(captured.err.splitlines()) == 1
     assert project.current_path.read_bytes() == pointer_before
 

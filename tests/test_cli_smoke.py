@@ -32,3 +32,18 @@ def test_wrapper_prints_version_from_project_environment() -> None:
     )
     assert result.returncode == 0
     assert result.stdout.strip() == __version__
+
+
+def test_help_advertises_complete_phase1(capsys) -> None:
+    assert main([]) == 0
+    help_text = capsys.readouterr().out
+    assert all(command in help_text for command in ("index", "memory", "get", "find"))
+    for argv in (
+        ["index", "--help"],
+        ["memory", "status", "--help"],
+        ["get", "--help"],
+        ["find", "--help"],
+    ):
+        with pytest.raises(SystemExit) as raised:
+            main(argv)
+        assert raised.value.code == 0
