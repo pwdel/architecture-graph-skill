@@ -79,7 +79,8 @@ def decisions_query(reader: SnapshotReader, *, score: str = "navigation", fields
     records = []
     for decision in reader.iter("decisions"):
         item = summarize_record(dict(decision), rankings)
-        item = compose_decision_summary(item, resolutions.get(str(decision["id"])))
+        if overlay_reader is not None and not base_only:
+            item = compose_decision_summary(item, resolutions.get(str(decision["id"])))
         records.append(item)
     records.sort(key=lambda x: (-float(x.get("scores", {}).get(score, 0)), str(x["id"])))
     records = _project_compact(records, fields, "decisions")
