@@ -36,6 +36,17 @@ Use `criticality` for consequence, `review_priority` for gaps and conflicts,
 and `extraction_confidence` for interpretation reliability. Centrality is a
 navigation aid, not architectural importance.
 
+Term and graph ranking always cover the complete selected corpus. `--limit` and
+`--max-chars` constrain only the compact response. An empty `items` list means
+there are no matches; oversized compact records fail explicitly instead of
+returning a non-progressing cursor.
+
+The default `report` is intentionally concise. Each assertion includes at most
+two citations, an evidence count, and an appendix assertion ID. Pass that ID to
+`evidence --for ASSERTION_ID` to page the complete evidence ledger. Use
+`explain --id RECORD_ID` for navigation, criticality, review priority,
+extraction confidence, corroboration, and completeness feature vectors.
+
 Phase 2 supports prose, Markdown ADRs, plaintext, Mermaid, PlantUML, YAML, and
 JSON through one semantic model. It does not interpret images. Capabilities
 also report review mutation, decision lineage, and semantic diff as unavailable.

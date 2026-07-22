@@ -26,6 +26,9 @@ The current implementation includes Phase 1 indexing and Phase 2 deterministic a
 - build and traverse a typed evidence graph
 - rank navigation, criticality, review priority, and extraction confidence independently
 - reduce source-anchored decisions and render evidence-linked reports
+- rank the complete selected corpus while returning compact, context-bounded views
+- reconstruct decision objects from prose, ADRs, JSON, and YAML sibling fields
+- separate concise report assertions from paginated evidence appendices
 
 The command surface is:
 
@@ -72,6 +75,17 @@ The intended architecture pipeline is:
 8. Produce human-readable engineer reports that cite source evidence and raise focused questions for architects.
 
 The ranking model is deliberately not just "important nouns with many edges." Terms help find architecture vocabulary. Claims and decisions are the primary units of review.
+
+Analysis and presentation have separate limits. Indexing extracts and ranks all
+eligible records in the selected corpus. Query `--limit` and `--max-chars`
+options only bound the returned projection; they never change persisted scores
+or ordering. List commands return compact records with evidence counts and
+representative evidence IDs. Use `get`, `evidence`, and `explain` for complete
+records, paginated provenance, and independent feature vectors.
+
+The default report uses at most two representative citations per assertion and
+links each assertion to an evidence appendix ID. This keeps the report useful
+for orientation without discarding the complete source-backed ledger.
 
 ## Repository Layout
 
@@ -169,6 +183,6 @@ uv run architecture-graph index tests/fixtures/phase1_repo --json
 
 ## Current Status
 
-Version 0.3.0 provides deterministic prose-first evidence graphs. JSON and YAML
+Version 0.3.1 provides deterministic prose-first evidence graphs with complete-corpus ranking and bounded evidence retrieval. JSON and YAML
 contribute structure but are optional. The next increments may add human review
 and semantic history; image interpretation remains outside the current scope.

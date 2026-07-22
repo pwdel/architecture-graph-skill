@@ -24,13 +24,22 @@ def discover_terms(parsed: ParsedCorpus) -> TermResult:
     docs: dict[str, Counter[str]] = defaultdict(Counter)
     evidence: dict[str, set[str]] = defaultdict(set)
     forms: dict[str, set[str]] = defaultdict(set)
+    occurrences: Counter[str] = Counter()
+    phrase_occurrences: Counter[str] = Counter()
     signals: dict[str, set[str]] = defaultdict(lambda: {"tfidf"})
     for sentence in parsed.sentences:
         candidates = [token for token in sentence.tokens if token.casefold() not in stop and len(token) > 2]
         candidates.extend(sentence.noun_phrases)
+        seen_in_sentence: set[str] = set()
         for raw in candidates:
             canonical = " ".join(raw.casefold().split())
+            if canonical in seen_in_sentence:
+                continue
+            seen_in_sentence.add(canonical)
             docs[sentence.source_content_hash][canonical] += 1
+            occurrences[canonical] += 1
+            if " " in canonical:
+                phrase_occurrences[canonical] += 1
             evidence[canonical].add(sentence.evidence_id)
             forms[canonical].add(raw)
             if sentence.section_role == "glossary": signals[canonical].add("explicit_glossary")
@@ -39,6 +48,7 @@ def discover_terms(parsed: ParsedCorpus) -> TermResult:
             forms[acronym.casefold()].add(acronym)
             evidence[acronym.casefold()].add(sentence.evidence_id)
             docs[sentence.source_content_hash][acronym.casefold()] += 1
+            occurrences[acronym.casefold()] += 1
     document_count = max(1, len(docs))
     terms: list[Record] = []
     derivations: list[Record] = []
@@ -49,7 +59,8 @@ def discover_terms(parsed: ParsedCorpus) -> TermResult:
         score = max((1 + math.log(docs[digest][term])) * idf for digest in present)
         derivation = build_analysis_derivation("sparse_tfidf", tuple(sorted(evidence[term])), "term", term)
         derivations.append(derivation)
-        record = finalize_record({"id": stable_id("term", term), "kind": "term", "canonical_form": term, "observed_forms": sorted(forms[term]), "term_kind": "acronym" if "acronym" in signals[term] else "noun_phrase", "distinct_source_count": len(present), "document_frequency": len(present), "tfidf": round(score, 8), "discovery_signals": sorted(signals[term]), "evidence_ids": sorted(evidence[term]), "derivation_ids": [derivation["id"]]})
+        lexical_features = {"tfidf": round(score, 8), "document_frequency": len(present), "occurrence_count": occurrences[term], "phrase_frequency": phrase_occurrences[term]}
+        record = finalize_record({"id": stable_id("term", term), "kind": "term", "canonical_form": term, "observed_forms": sorted(forms[term]), "term_kind": "acronym" if "acronym" in signals[term] else "noun_phrase", "distinct_source_count": len(present), "document_frequency": len(present), "occurrence_count": occurrences[term], "phrase_frequency": phrase_occurrences[term], "tfidf": round(score, 8), "lexical_features": lexical_features, "discovery_signals": sorted(signals[term]), "evidence_ids": sorted(evidence[term]), "derivation_ids": [derivation["id"]]})
         terms.append(record)
         for evidence_id in evidence[term]: weights[evidence_id][term] = round(score, 8)
     return TermResult(tuple(terms), (), tuple(derivations), dict(weights))

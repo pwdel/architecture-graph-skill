@@ -12,7 +12,7 @@ from architecture_graph.canonical import canonical_dumps
 from architecture_graph.capabilities import capability_record
 from architecture_graph.corpus import CorpusSelection, MemoryNotIgnoredError
 from architecture_graph.config import ConfigurationPathError
-from architecture_graph.errors import ArchitectureGraphError
+from architecture_graph.errors import ArchitectureGraphError, RecordTooLargeError
 from architecture_graph.indexer import index_corpus
 from architecture_graph.project import ProjectPaths, RepositoryStateError
 from architecture_graph.query import (
@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--cursor")
     commands.choices["neighbors"].add_argument("--node", required=True)
     commands.choices["neighbors"].add_argument("--depth", type=int, default=1)
-    commands.choices["decisions"].add_argument("--score", choices=("navigation", "criticality", "review_priority", "extraction_confidence"), default="navigation")
+    commands.choices["decisions"].add_argument("--score", choices=("navigation", "criticality", "review_priority", "extraction_confidence", "corroboration", "completeness"), default="navigation")
     commands.choices["evidence"].add_argument("--for", dest="record_id", required=True)
     commands.choices["explain"].add_argument("--id", dest="record_id", required=True)
     return parser
@@ -171,6 +171,8 @@ def _print_error(error: ArchitectureGraphError, as_json: bool) -> None:
 
 
 def _as_expected(error: Exception) -> ArchitectureGraphError:
+    if isinstance(error, RecordTooLargeError):
+        return ArchitectureGraphError("record_too_large", str(error), error.record_id)
     if isinstance(error, MemoryNotIgnoredError):
         ignored_path = str(error).split("add ", 1)[-1].split(" to ", 1)[0]
         return ArchitectureGraphError(
@@ -255,9 +257,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             project = _select_project(args.root, args.corpus, args.memory_root)
             reader = SnapshotReader.open(project, args.snapshot)
             if args.command == "report":
-                report = build_report(reader, limits=ReportLimits.defaults())
+                report = build_report(reader, limits=ReportLimits(max_chars=args.max_chars))
                 if as_json:
-                    print(canonical_dumps({"assertions": list(report.assertions), "text": render_report_text(report)}))
+                    assertions = [{key: value for key, value in item.items() if key != "evidence_ids"} for item in report.assertions]
+                    payload = {"coverage": report.coverage, "assertions": assertions}
+                    while len(canonical_dumps(payload)) + 1 > args.max_chars and assertions:
+                        assertions.pop()
+                    if len(canonical_dumps(payload)) + 1 > args.max_chars:
+                        raise ValueError("report max_chars is too small for coverage metadata")
+                    print(canonical_dumps(payload))
                 else:
                     sys.stdout.write(render_report_text(report))
                 return 0

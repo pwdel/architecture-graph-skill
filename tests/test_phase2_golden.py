@@ -38,7 +38,7 @@ def test_phase2_acceptance_contract(tmp_path) -> None:
     claims = tuple(reader.iter("claims"))
     assert {item["parser_provenance"] for item in claims} >= {"rule_prose", "diagram_edge"}
     rankings = tuple(reader.iter("rankings"))
-    assert all(set(item["scores"]) == {"navigation", "criticality", "review_priority", "extraction_confidence"} for item in rankings)
+    assert all(set(item["scores"]) == {"navigation", "criticality", "review_priority", "extraction_confidence", "corroboration", "completeness"} for item in rankings)
     text = render_report_text(build_report(reader, limits=ReportLimits.defaults()))
     expected = (Path(__file__).parent / "fixtures" / "golden" / "phase2" / "report-headings.txt").read_text().splitlines()
     assert all(heading in text for heading in expected)
@@ -69,6 +69,6 @@ def test_diagram_claims_use_real_endpoints(tmp_path) -> None:
 def test_semantic_derivations_use_active_snapshot_identity(tmp_path) -> None:
     reader = _index(tmp_path / "repo")
     derivation = next(x for x in reader.iter("derivations") if x["method"] == "sparse_tfidf")
-    assert derivation["tool_version"] == "0.3.0"
+    assert derivation["tool_version"] == "0.3.1"
     assert derivation["configuration_digest"] == reader.manifest["configuration_digest"]
     assert derivation["pipeline_digest"] == reader.manifest["deterministic_pipeline_digest"]
