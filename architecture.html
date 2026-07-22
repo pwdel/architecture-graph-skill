@@ -262,7 +262,8 @@
   .stage{
     position:relative;
     width: 100%;
-    height: 460px;
+    height: 560px;
+    container-type: inline-size;
   }
 
   .stage svg.wires{
@@ -273,7 +274,7 @@
   /* node */
   .node{
     position:absolute;
-    width: 150px;
+    width: clamp(108px, 16cqi, 150px);
     padding: 14px 14px 12px;
     background: var(--panel-2);
     border: 1px solid var(--border-2);
@@ -336,6 +337,16 @@
     content:""; position:absolute; left:0; top:14px; bottom:14px; width:3px;
     background: var(--c); border-radius: 3px;
     opacity:.7;
+  }
+
+  /* At the narrow end of the two-column desktop layout, keep text inside the
+     responsive node width without increasing its rectangle into another row. */
+  @container (max-width: 850px){
+    .node{ padding:10px 10px 8px; }
+    .node .icon{ width:24px; height:24px; margin-bottom:6px; }
+    .node .label{ font-size:12px; line-height:1.2; }
+    .node .tech, .node .port{ font-size:9px; line-height:1.25; }
+    .node .port{ margin-top:6px; }
   }
 
   /* Hidden state retained for the template's node renderer. */
@@ -803,7 +814,7 @@
       </div>
 
       <!-- Rationale overlay, separated below the immutable base path -->
-      <div class="node" data-role="seed" data-id="overlay" style="left: 62%; top: 72%;">
+      <div class="node" data-role="seed" data-id="overlay" style="left: 62%; top: 73%;">
         <div class="icon">
           <!-- sprout icon -->
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22V8"/><path d="M5 12c0-3.5 3-7 7-7"/><path d="M19 12c0-3.5-3-7-7-7"/></svg>
@@ -834,7 +845,7 @@
         <span class="step-badge">·</span>
       </div>
 
-      <div class="node" data-role="orch" data-id="presentation" style="left: 82%; top: 72%;">
+      <div class="node" data-role="orch" data-id="presentation" style="left: 82%; top: 73%;">
         <div class="icon">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
         </div>
