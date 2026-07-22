@@ -10,7 +10,8 @@ from architecture_graph.canonical import atomic_write_json, canonical_bytes, sha
 from architecture_graph.jsonl_store import iter_records, write_records
 from architecture_graph.overlay_contract import validate_rationale_overlay
 from architecture_graph.overlay_types import RationaleOverlayManifest, RationaleOverlayResult
-from architecture_graph.project import ProjectPaths
+from architecture_graph.project import ProjectLock, ProjectPaths
+from architecture_graph.records import validate_record
 from architecture_graph.snapshot import SnapshotReader
 from architecture_graph.rationale_rules import rationale_rule_digest
 
@@ -44,7 +45,11 @@ class RationaleOverlayReader:
         if overlay_id is None:
             if not paths.current.is_file():
                 raise FileNotFoundError("rationale overlay not found")
-            overlay_id = json.loads(paths.current.read_text())["overlay_id"]
+            try:
+                current = json.loads(paths.current.read_text())
+                overlay_id = current["overlay_id"]
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise ValueError("rationale overlay validation failed: invalid current pointer") from error
         directory = paths.snapshots / overlay_id.replace(":", "-")
         manifest = json.loads((directory / "MANIFEST.json").read_text())
         if manifest.get("overlay_id") != overlay_id:
@@ -124,20 +129,36 @@ def publish_rationale_overlay(paths: RationaleOverlayPaths, manifest: RationaleO
     issues = validate_rationale_overlay(result.resolutions, base, result.derivations)
     if issues:
         raise ValueError(f"rationale overlay validation failed: {issues[0].field}: {issues[0].message}")
+    for record in (*result.derivations, *result.warnings):
+        validate_record(record)
+    actual_counts = {
+        name: sum(1 for item in result.resolutions if item.get("classification") == name)
+        for name in ("explicit", "recognized_alias", "ambiguous", "missing")
+    }
+    if result.coverage.as_record() != {
+        "decisions_examined": len(result.resolutions),
+        **actual_counts,
+        "warnings": len(result.warnings),
+    }:
+        raise ValueError("rationale overlay validation failed: coverage: does not match records")
     _assert_base_unchanged(base, manifest)
-    paths.snapshots.mkdir(parents=True, exist_ok=True)
-    target = paths.snapshots / manifest.overlay_id.replace(":", "-")
-    if not target.exists():
-        stage = Path(tempfile.mkdtemp(prefix=".rationale-", dir=paths.snapshots))
-        write_records(stage / "rationale-resolutions.jsonl", result.resolutions)
-        write_records(stage / "derivations.jsonl", result.derivations)
-        write_records(stage / "warnings.jsonl", result.warnings)
-        atomic_write_json(stage / "MANIFEST.json", manifest.as_record())
+    if manifest != build_overlay_manifest(base, result):
+        raise ValueError("rationale overlay validation failed: manifest: does not match content")
+    with ProjectLock(base.project.lock_path):
         _assert_base_unchanged(base, manifest)
-        os.replace(stage, target)
-    _assert_base_unchanged(base, manifest)
-    RationaleOverlayReader.open(paths, manifest.overlay_id, base=base)
-    atomic_write_json(paths.current, {"overlay_id": manifest.overlay_id})
+        paths.snapshots.mkdir(parents=True, exist_ok=True)
+        target = paths.snapshots / manifest.overlay_id.replace(":", "-")
+        if not target.exists():
+            stage = Path(tempfile.mkdtemp(prefix=".rationale-", dir=paths.snapshots))
+            write_records(stage / "rationale-resolutions.jsonl", result.resolutions)
+            write_records(stage / "derivations.jsonl", result.derivations)
+            write_records(stage / "warnings.jsonl", result.warnings)
+            atomic_write_json(stage / "MANIFEST.json", manifest.as_record())
+            _assert_base_unchanged(base, manifest)
+            os.replace(stage, target)
+        RationaleOverlayReader.open(paths, manifest.overlay_id, base=base)
+        _assert_base_unchanged(base, manifest)
+        atomic_write_json(paths.current, {"overlay_id": manifest.overlay_id})
     return manifest.overlay_id
 
 

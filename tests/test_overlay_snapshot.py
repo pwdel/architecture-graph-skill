@@ -2,6 +2,7 @@ from pathlib import Path
 
 import json
 import pytest
+from dataclasses import replace
 
 from architecture_graph.overlay_snapshot import (
     RationaleOverlayPaths,
@@ -44,3 +45,14 @@ def test_publication_rejects_stale_base_before_advancing_current(tmp_path: Path)
     with pytest.raises(ValueError, match="base snapshot changed"):
         publish_rationale_overlay(paths, manifest, result, reader)
     assert not paths.current.exists()
+
+
+def test_invalid_manifest_is_rejected_before_overlay_directory_is_published(tmp_path: Path) -> None:
+    reader = _index(tmp_path / "repo")
+    paths = RationaleOverlayPaths.for_base(reader.project, reader.snapshot_id)
+    result = resolve_rationales(reader)
+    valid = build_overlay_manifest(reader, result)
+    invalid = replace(valid, content_digest="sha256:" + "0" * 64)
+    with pytest.raises(ValueError, match="overlay validation failed"):
+        publish_rationale_overlay(paths, invalid, result, reader)
+    assert not (paths.snapshots / invalid.overlay_id.replace(":", "-")).exists()

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
-from architecture_graph.analysis_types import build_analysis_derivation
+from architecture_graph import __version__
+from architecture_graph.analysis_types import analysis_identity, build_analysis_derivation
 from architecture_graph.canonical import stable_id
 from architecture_graph.overlay_types import RationaleCoverage, RationaleOverlayResult
-from architecture_graph.rationale_rules import load_rationale_rules
+from architecture_graph.rationale_rules import load_rationale_rules, rationale_rule_digest
 from architecture_graph.records import Record, finalize_record
 from architecture_graph.snapshot import SnapshotReader
 
@@ -13,8 +14,8 @@ from architecture_graph.snapshot import SnapshotReader
 def resolve_rationales(base: SnapshotReader) -> RationaleOverlayResult:
     rules = load_rationale_rules()
     aliases = dict(rules["aliases"])
-    structured: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    prose: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    structured: dict[tuple[str, str], list[tuple[str, str, str]]] = defaultdict(list)
+    prose: dict[tuple[str, tuple[str, ...]], list[tuple[str, str, str]]] = defaultdict(list)
     for segment in base.iter("segments"):
         metadata = segment.get("metadata", {})
         pointer = metadata.get("json_pointer") if isinstance(metadata, dict) else None
@@ -22,7 +23,10 @@ def resolve_rationales(base: SnapshotReader) -> RationaleOverlayResult:
             parent, role = pointer.rsplit("/", 1)
             if role in aliases:
                 for evidence_id in segment.get("evidence_ids", []):
-                    structured[parent].append((role, str(evidence_id)))
+                    source_id = str(segment["source_version_id"])
+                    structured[(source_id, parent)].append(
+                        (role, str(evidence_id), f"structured:{source_id}:{parent}")
+                    )
         heading_path = segment.get("heading_path", [])
         if (
             isinstance(heading_path, list)
@@ -31,11 +35,14 @@ def resolve_rationales(base: SnapshotReader) -> RationaleOverlayResult:
             and segment.get("segment_kind") not in {"heading", "metadata_field"}
         ):
             role = str(heading_path[-1]).strip().casefold()
+            source_id = str(segment["source_version_id"])
+            owner_path = tuple(str(value) for value in heading_path[:-1])
             for evidence_id in segment.get("evidence_ids", []):
-                prose[str(segment["source_version_id"])].append((role, str(evidence_id)))
+                prose[(source_id, owner_path)].append(
+                    (role, str(evidence_id), f"prose:{source_id}:{'/'.join(owner_path)}")
+                )
     decisions = list(base.iter("decisions"))
     decision_sources: dict[str, set[str]] = {}
-    source_decision_counts: Counter[str] = Counter()
     for decision in decisions:
         source_ids = {
             str(evidence["source_version_id"])
@@ -43,32 +50,46 @@ def resolve_rationales(base: SnapshotReader) -> RationaleOverlayResult:
             if (evidence := base.get("evidence", str(evidence_id))) is not None
         }
         decision_sources[str(decision["id"])] = source_ids
-        source_decision_counts.update(source_ids)
     resolutions: list[Record] = []
     derivations: list[Record] = []
     counts: Counter[str] = Counter()
     for decision in decisions:
         scope = [str(value) for value in decision.get("scope", [])]
         parent = "/" + "/".join(scope) if scope else ""
-        candidates = list(structured.get(parent, []))
+        candidates: list[tuple[str, str, str]] = []
+        for source_id in decision_sources[str(decision["id"])]:
+            candidates.extend(structured.get((source_id, parent), []))
         candidates.extend(
-            ("rationale", str(evidence_id))
+            ("rationale", str(evidence_id), f"decision:{decision['id']}")
             for evidence_id in decision.get("rationale_evidence_ids", [])
         )
         if decision.get("anchor_kind") == "decision_heading":
             for source_id in decision_sources[str(decision["id"])]:
-                if source_decision_counts[source_id] == 1:
-                    candidates.extend(prose.get(source_id, []))
-        roles = sorted({role for role, _ in candidates})
-        evidence_ids = sorted({evidence for _, evidence in candidates})
+                owner_path = tuple(scope[:-1]) if scope and scope[-1].casefold() == "decision" else tuple(scope)
+                candidates.extend(prose.get((source_id, owner_path), []))
+        explicit_candidates = [item for item in candidates if item[0] == "rationale"]
+        eligible = explicit_candidates or candidates
+        roles = sorted({role for role, _, _ in eligible})
+        evidence_ids = sorted({evidence for _, evidence, _ in eligible})
+        scope_keys = {scope_key for _, _, scope_key in eligible}
+        normalized_texts = {
+            " ".join(str(evidence.get("text", "")).casefold().split())
+            for evidence_id in evidence_ids
+            if (evidence := base.get("evidence", evidence_id)) is not None
+        }
         if "rationale" in roles:
-            classification = "explicit"
+            classification = "ambiguous" if len(scope_keys) > 1 and len(normalized_texts) > 1 else "explicit"
         elif roles:
-            classification = "recognized_alias"
+            classification = "ambiguous" if len(scope_keys) > 1 and len(normalized_texts) > 1 else "recognized_alias"
         else:
             classification = "missing"
         counts[classification] += 1
-        derivation = build_analysis_derivation("rationale_rules_v1", evidence_ids or [str(decision["id"])], "rationale_resolution", str(decision["id"]))
+        with analysis_identity(
+            __version__,
+            str(base.manifest["configuration_digest"]),
+            rationale_rule_digest(),
+        ):
+            derivation = build_analysis_derivation("rationale_rules_v1", evidence_ids or [str(decision["id"])], "rationale_resolution", str(decision["id"]))
         derivations.append(derivation)
         resolves = ["missing_rationale"] if classification in {"explicit", "recognized_alias"} and "missing_rationale" in decision.get("diagnostic_codes", []) else []
         record_id = stable_id("rationale-resolution", base.snapshot_id, decision["id"], classification, roles, evidence_ids)

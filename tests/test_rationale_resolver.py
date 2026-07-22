@@ -59,3 +59,82 @@ def test_markdown_rationale_section_resolves_single_adr(architecture_repo) -> No
     assert resolution["classification"] == "explicit"
     assert resolution["observed_roles"] == ["rationale"]
     assert resolution["evidence_ids"]
+
+
+def test_structured_rationale_never_crosses_source_pointer_collision(architecture_repo) -> None:
+    directory = architecture_repo / "architecture"
+    directory.mkdir()
+    first = directory / "first.json"
+    second = directory / "second.json"
+    first.write_text(json.dumps({"decision_log": [{"decision": "Use adapters", "context": "Centralize contracts"}]}))
+    second.write_text(json.dumps({"decision_log": [{"decision": "Use ports"}]}))
+    git(architecture_repo, "add", "architecture")
+    git(architecture_repo, "commit", "-m", "plans")
+    ignore_architecture_graph(architecture_repo)
+    indexed = index_corpus((first, second))
+    reader = SnapshotReader.open(ProjectPaths.for_corpus(indexed.selection))
+    by_statement = {
+        next(item for item in reader.iter("decisions") if item["id"] == resolution["decision_id"])["statement"]: resolution
+        for resolution in resolve_rationales(reader).resolutions
+    }
+    assert by_statement["Use adapters"]["classification"] == "recognized_alias"
+    assert by_statement["Use ports"]["classification"] == "missing"
+
+
+def test_decision_local_why_now_is_eligible(architecture_repo) -> None:
+    path = architecture_repo / "architecture" / "plan.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"why_now": "Plan timing", "decision_log": [{"decision": "Use adapters", "why_now": "Avoid duplicated contracts"}]}))
+    git(architecture_repo, "add", "architecture/plan.json")
+    git(architecture_repo, "commit", "-m", "plan")
+    ignore_architecture_graph(architecture_repo)
+    indexed = index_corpus((path,))
+    reader = SnapshotReader.open(ProjectPaths.for_corpus(indexed.selection))
+    resolution = resolve_rationales(reader).resolutions[0]
+    assert resolution["classification"] == "recognized_alias"
+    assert resolution["observed_roles"] == ["why_now"]
+
+
+def test_conflicting_cross_source_rationales_are_ambiguous(architecture_repo) -> None:
+    directory = architecture_repo / "architecture"
+    directory.mkdir()
+    first = directory / "first.json"
+    second = directory / "second.json"
+    first.write_text(json.dumps({"decision_log": [{"decision": "Use adapters", "context": "Centralize contracts"}]}))
+    second.write_text(json.dumps({"decision_log": [{"decision": "Use adapters", "context": "Permit vendor switching"}]}))
+    git(architecture_repo, "add", "architecture")
+    git(architecture_repo, "commit", "-m", "plans")
+    ignore_architecture_graph(architecture_repo)
+    indexed = index_corpus((first, second))
+    reader = SnapshotReader.open(ProjectPaths.for_corpus(indexed.selection))
+    resolution = resolve_rationales(reader).resolutions[0]
+    assert resolution["classification"] == "ambiguous"
+    assert resolution["resolves_diagnostics"] == []
+
+
+def test_markdown_rationale_is_bounded_to_its_decision_heading(architecture_repo) -> None:
+    path = architecture_repo / "architecture" / "decisions.md"
+    path.parent.mkdir()
+    path.write_text(
+        "# ADR A\n\n## Decision\n\nFrontend must use adapters.\n\n"
+        "## Rationale\n\nCentralize frontend contracts.\n\n"
+        "# ADR B\n\n## Decision\n\nBackend must use ports.\n\n"
+        "## Rationale\n\nKeep infrastructure replaceable.\n"
+    )
+    git(architecture_repo, "add", "architecture/decisions.md")
+    git(architecture_repo, "commit", "-m", "adrs")
+    ignore_architecture_graph(architecture_repo)
+    indexed = index_corpus((path,))
+    reader = SnapshotReader.open(ProjectPaths.for_corpus(indexed.selection))
+    resolutions = resolve_rationales(reader).resolutions
+    assert len(resolutions) == 2
+    evidence_texts = {
+        resolution["decision_id"]: {
+            reader.get("evidence", evidence_id)["text"]
+            for evidence_id in resolution["evidence_ids"]
+        }
+        for resolution in resolutions
+    }
+    for decision in reader.iter("decisions"):
+        expected = "Centralize frontend contracts." if "Frontend" in decision["statement"] else "Keep infrastructure replaceable."
+        assert evidence_texts[decision["id"]] == {expected}

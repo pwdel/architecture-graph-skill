@@ -290,8 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sys.stdout.write(render_query_envelope(result, "json" if as_json else "markdown"))
                     return 0
                 else:
-                    counts = {name: sum(1 for item in records if item.get("classification") == name) for name in ("explicit", "recognized_alias", "ambiguous", "missing")}
-                    payload = {"overlay_id": overlay.overlay_id, "base_snapshot_id": overlay.manifest["base_snapshot_id"], "coverage": {"decisions_examined": len(records), **counts}}
+                    payload = {"overlay_id": overlay.overlay_id, "base_snapshot_id": overlay.manifest["base_snapshot_id"], "coverage": overlay.manifest["coverage"]}
             rendered = canonical_dumps(payload) + "\n"
             if len(rendered) > args.max_chars: raise ValueError("rationale response exceeds max_chars")
             sys.stdout.write(rendered)

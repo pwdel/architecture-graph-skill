@@ -84,7 +84,8 @@ def decisions_query(reader: SnapshotReader, *, score: str = "navigation", fields
         records.append(item)
     records.sort(key=lambda x: (-float(x.get("scores", {}).get(score, 0)), str(x["id"])))
     records = _project_compact(records, fields, "decisions")
-    return _page(reader, records, binding={"snapshot_id": reader.snapshot_id, "command": "decisions", "score": score, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)
+    overlay_id = None if overlay_reader is None or base_only else overlay_reader.overlay_id
+    return _page(reader, records, binding={"snapshot_id": reader.snapshot_id, "command": "decisions", "score": score, "fields": fields, "limit": limit, "max_chars": max_chars, "base_only": base_only, "overlay_id": overlay_id, "composition_version": 1}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)
 
 
 def neighbors_query(reader: SnapshotReader, *, node_id: str, depth: int = 1, fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:

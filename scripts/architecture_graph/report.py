@@ -70,8 +70,16 @@ def _hydrate_assertion(item: Record, evidence: dict[str, Record], section: str, 
     label = item.get("title") or item.get("name") or item.get("canonical_form") or item.get("id")
     assertion_id = stable_id("assertion", section, item.get("id"), evidence_ids)
     result = {"id": assertion_id, "kind": "assertion", "subject_id": item.get("id"), "title": label, "section": section, "evidence_count": len(evidence_ids), "evidence_ids": evidence_ids, "citations": citations, "shown_evidence_ids": [citation["evidence_id"] for citation in citations], "appendix_record_id": assertion_id}
+    for field in ("base_diagnostics", "resolved_diagnostics", "active_diagnostics"):
+        if field in item:
+            result[field] = item[field]
     if item.get("rationale_resolution"):
         result["rationale_resolution"] = item["rationale_resolution"]
+        result["rationale_citations"] = [
+            {"evidence_id": evidence_id, "path": source["path"], "span": source["span"], "text": source["text"]}
+            for evidence_id in item["rationale_resolution"].get("top_evidence_ids", [])
+            if (source := evidence.get(str(evidence_id))) is not None
+        ]
     return result
 
 
@@ -118,7 +126,12 @@ def render_report_text(result: ReportResult) -> str:
             resolution = item.get("rationale_resolution")
             if resolution and resolution.get("classification") in {"explicit", "recognized_alias"}:
                 roles = ", ".join(resolution.get("observed_roles", []))
-                lines.append(f"  Rationale recognized through {roles}.")
+                rationale_citations = "; ".join(
+                    _render_citation(citation)
+                    for citation in item.get("rationale_citations", [])
+                )
+                suffix = "" if not rationale_citations else f" [{rationale_citations}]"
+                lines.append(f"  Rationale recognized through {roles}.{suffix}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
