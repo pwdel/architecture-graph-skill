@@ -9,6 +9,7 @@ from architecture_graph.records import RECORD_TYPES, Record
 from architecture_graph.semantic_graph import GraphResult, bounded_neighbors
 from architecture_graph.snapshot import SnapshotReader
 from architecture_graph.views import summarize_record
+from architecture_graph.overlay_queries import compose_decision_summary
 
 
 def _coverage(reader: SnapshotReader) -> Record:
@@ -71,12 +72,14 @@ def terms_query(reader: SnapshotReader, *, fields: Sequence[str] | None = None, 
     return _page(reader, records, binding={"snapshot_id": reader.snapshot_id, "command": "terms", "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)
 
 
-def decisions_query(reader: SnapshotReader, *, score: str = "navigation", fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
+def decisions_query(reader: SnapshotReader, *, score: str = "navigation", fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None, overlay_reader=None, base_only: bool = False) -> QueryEnvelope:
     if score not in {"navigation", "criticality", "review_priority", "extraction_confidence", "corroboration", "completeness"}: raise ValueError("invalid score")
     rankings = {str(x["node_id"]): x for x in reader.iter("rankings")}
+    resolutions = {} if overlay_reader is None or base_only else {str(x["decision_id"]): x for x in overlay_reader.iter_resolutions()}
     records = []
     for decision in reader.iter("decisions"):
         item = summarize_record(dict(decision), rankings)
+        item = compose_decision_summary(item, resolutions.get(str(decision["id"])))
         records.append(item)
     records.sort(key=lambda x: (-float(x.get("scores", {}).get(score, 0)), str(x["id"])))
     records = _project_compact(records, fields, "decisions")
@@ -107,7 +110,7 @@ def evidence_query(reader: SnapshotReader, *, record_id: str, fields: Sequence[s
     return _page(reader, records, binding={"snapshot_id": reader.snapshot_id, "command": "evidence", "record_id": record_id, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=limit, max_chars=max_chars, cursor=cursor)
 
 
-def explain_query(reader: SnapshotReader, *, record_id: str, fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None) -> QueryEnvelope:
+def explain_query(reader: SnapshotReader, *, record_id: str, fields: Sequence[str] | None = None, limit: int = 20, max_chars: int = 12_000, cursor: str | None = None, overlay_reader=None, base_only: bool = False) -> QueryEnvelope:
     catalog = _catalog(reader)
     record = catalog.get(record_id)
     rankings = [dict(x) for x in catalog.iter("ranking") if x.get("node_id") == record_id]
@@ -122,4 +125,7 @@ def explain_query(reader: SnapshotReader, *, record_id: str, fields: Sequence[st
             derivations.append({"id": source["id"], "method": source.get("method"), "producer_kind": source.get("producer_kind")})
     scores = rankings[0].get("scores", {}) if rankings else {}
     item: Record = {"id": "explanation:" + record_id, "kind": "explanation", "record_summary": summarize_record(dict(record), {record_id: rankings[0]} if rankings else None), "scores": scores, "evidence_count": len(record.get("evidence_ids", [])), "representative_evidence": evidence, "derivation_count": len(record.get("derivation_ids", [])), "representative_derivations": derivations}
+    if record.get("kind") == "decision" and overlay_reader is not None and not base_only:
+        resolution = next((x for x in overlay_reader.iter_resolutions() if x.get("decision_id") == record_id), None)
+        item["record_summary"] = compose_decision_summary(item["record_summary"], resolution)
     return _page(reader, [item], binding={"snapshot_id": reader.snapshot_id, "command": "explain", "record_id": record_id, "fields": fields, "limit": limit, "max_chars": max_chars}, fields=fields, limit=1, max_chars=max_chars, cursor=cursor)

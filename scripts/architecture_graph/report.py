@@ -25,14 +25,23 @@ class ReportResult:
     coverage: Record
 
 
-def build_report(reader: SnapshotReader, *, limits: ReportLimits) -> ReportResult:
+def build_report(reader: SnapshotReader, *, limits: ReportLimits, overlay_reader=None, base_only: bool = False) -> ReportResult:
     rankings = {str(x["node_id"]): x for x in reader.iter("rankings")}
     nodes = {str(x["id"]): x for kind in ("terms", "entities", "claims", "decisions") for x in reader.iter(kind)}
     decisions = tuple(sorted(reader.iter("decisions"), key=lambda x: (-float((rankings.get(str(x["id"]), {}).get("scores", {}).get("criticality") or {}).get("score", 0)), str(x["id"]))))[:limits.section_items]
+    if overlay_reader is not None and not base_only:
+        from architecture_graph.overlay_queries import compose_decision_summary
+        resolutions = {str(x["decision_id"]): x for x in overlay_reader.iter_resolutions()}
+        decisions = tuple(compose_decision_summary(dict(item), resolutions.get(str(item["id"]))) for item in decisions)
     terms = tuple(sorted(reader.iter("terms"), key=lambda x: (-float(x["tfidf"]), str(x["id"]))))[:limits.section_items]
     navigation_ids = sorted(rankings, key=lambda node_id: (-float(rankings[node_id]["scores"]["navigation"]["score"]), node_id))[:limits.section_items]
     navigation = tuple(nodes[node_id] for node_id in navigation_ids if node_id in nodes and nodes[node_id].get("evidence_ids"))
-    review = tuple(item for item in decisions if "missing_rationale" in item.get("diagnostic_codes", []))
+    review = tuple(
+        item
+        for item in decisions
+        if "missing_rationale"
+        in item.get("active_diagnostics", item.get("diagnostic_codes", []))
+    )
     evidence = {str(x["id"]): x for x in reader.iter("evidence")}
     titles = ("Navigation hubs", "Critical decisions and constraints", "Review priorities", "Glossary candidates")
     sections = _hydrate_sections((navigation, decisions, review, terms), evidence, titles, limits.citation_limit)
@@ -60,7 +69,10 @@ def _hydrate_assertion(item: Record, evidence: dict[str, Record], section: str, 
             citations.append({"evidence_id": evidence_id, "path": source["path"], "span": source["span"], "text": source["text"]})
     label = item.get("title") or item.get("name") or item.get("canonical_form") or item.get("id")
     assertion_id = stable_id("assertion", section, item.get("id"), evidence_ids)
-    return {"id": assertion_id, "kind": "assertion", "subject_id": item.get("id"), "title": label, "section": section, "evidence_count": len(evidence_ids), "evidence_ids": evidence_ids, "citations": citations, "shown_evidence_ids": [citation["evidence_id"] for citation in citations], "appendix_record_id": assertion_id}
+    result = {"id": assertion_id, "kind": "assertion", "subject_id": item.get("id"), "title": label, "section": section, "evidence_count": len(evidence_ids), "evidence_ids": evidence_ids, "citations": citations, "shown_evidence_ids": [citation["evidence_id"] for citation in citations], "appendix_record_id": assertion_id}
+    if item.get("rationale_resolution"):
+        result["rationale_resolution"] = item["rationale_resolution"]
+    return result
 
 
 def _hydrate_sections(sections, evidence: dict[str, Record], titles, citation_limit: int):
@@ -103,6 +115,10 @@ def render_report_text(result: ReportResult) -> str:
             additional = int(item.get("evidence_count", 0)) - len(citations)
             suffix = f"; +{additional} additional; appendix {item['appendix_record_id']}" if additional > 0 else f"; appendix {item['appendix_record_id']}"
             lines.append(f"- {label} [{citation}{suffix}]")
+            resolution = item.get("rationale_resolution")
+            if resolution and resolution.get("classification") in {"explicit", "recognized_alias"}:
+                roles = ", ".join(resolution.get("observed_roles", []))
+                lines.append(f"  Rationale recognized through {roles}.")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
