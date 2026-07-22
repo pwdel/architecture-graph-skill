@@ -2,7 +2,10 @@ from pathlib import Path
 
 from helpers.rationale_overlay import capture_frozen_base
 from test_phase2_golden import _index
-from architecture_graph.overlay_contract import validate_rationale_resolution
+from architecture_graph.overlay_contract import (
+    validate_rationale_overlay,
+    validate_rationale_resolution,
+)
 
 
 def test_repeated_index_preserves_frozen_base(tmp_path: Path) -> None:
@@ -34,3 +37,15 @@ def test_resolution_contract_rejects_ranking_and_stale_decision(tmp_path: Path) 
     assert validate_rationale_resolution(record, reader) == ()
     assert validate_rationale_resolution({**record, "rank_eligible": True}, reader)
     assert validate_rationale_resolution({**record, "decision_content_digest": "sha256:" + "0" * 64}, reader)
+
+
+def test_overlay_requires_exactly_one_resolution_for_every_decision(tmp_path: Path) -> None:
+    reader = _index(tmp_path / "repo")
+    assert validate_rationale_overlay([], reader)
+
+
+def test_overlay_rejects_base_semantic_record_kinds(tmp_path: Path) -> None:
+    reader = _index(tmp_path / "repo")
+    decision = next(reader.iter("decisions"))
+    issues = validate_rationale_overlay([decision], reader)
+    assert any(issue.field == "kind" for issue in issues)

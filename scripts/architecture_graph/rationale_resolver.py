@@ -14,30 +14,57 @@ def resolve_rationales(base: SnapshotReader) -> RationaleOverlayResult:
     rules = load_rationale_rules()
     aliases = dict(rules["aliases"])
     structured: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    prose: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for segment in base.iter("segments"):
         metadata = segment.get("metadata", {})
         pointer = metadata.get("json_pointer") if isinstance(metadata, dict) else None
-        if not isinstance(pointer, str) or "/" not in pointer:
-            continue
-        parent, role = pointer.rsplit("/", 1)
-        if role in aliases:
+        if isinstance(pointer, str) and "/" in pointer:
+            parent, role = pointer.rsplit("/", 1)
+            if role in aliases:
+                for evidence_id in segment.get("evidence_ids", []):
+                    structured[parent].append((role, str(evidence_id)))
+        heading_path = segment.get("heading_path", [])
+        if (
+            isinstance(heading_path, list)
+            and heading_path
+            and str(heading_path[-1]).strip().casefold() in aliases
+            and segment.get("segment_kind") not in {"heading", "metadata_field"}
+        ):
+            role = str(heading_path[-1]).strip().casefold()
             for evidence_id in segment.get("evidence_ids", []):
-                structured[parent].append((role, str(evidence_id)))
+                prose[str(segment["source_version_id"])].append((role, str(evidence_id)))
+    decisions = list(base.iter("decisions"))
+    decision_sources: dict[str, set[str]] = {}
+    source_decision_counts: Counter[str] = Counter()
+    for decision in decisions:
+        source_ids = {
+            str(evidence["source_version_id"])
+            for evidence_id in decision.get("evidence_ids", [])
+            if (evidence := base.get("evidence", str(evidence_id))) is not None
+        }
+        decision_sources[str(decision["id"])] = source_ids
+        source_decision_counts.update(source_ids)
     resolutions: list[Record] = []
     derivations: list[Record] = []
     counts: Counter[str] = Counter()
-    for decision in base.iter("decisions"):
+    for decision in decisions:
         scope = [str(value) for value in decision.get("scope", [])]
         parent = "/" + "/".join(scope) if scope else ""
-        candidates = structured.get(parent, [])
+        candidates = list(structured.get(parent, []))
+        candidates.extend(
+            ("rationale", str(evidence_id))
+            for evidence_id in decision.get("rationale_evidence_ids", [])
+        )
+        if decision.get("anchor_kind") == "decision_heading":
+            for source_id in decision_sources[str(decision["id"])]:
+                if source_decision_counts[source_id] == 1:
+                    candidates.extend(prose.get(source_id, []))
         roles = sorted({role for role, _ in candidates})
         evidence_ids = sorted({evidence for _, evidence in candidates})
         if "rationale" in roles:
             classification = "explicit"
-        elif len(roles) == 1:
+        elif roles:
             classification = "recognized_alias"
-        elif len(roles) > 1:
-            classification = "ambiguous"
         else:
             classification = "missing"
         counts[classification] += 1

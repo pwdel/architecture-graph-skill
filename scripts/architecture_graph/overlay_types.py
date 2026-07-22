@@ -36,6 +36,11 @@ class RationaleOverlayManifest:
     rule_version: str
     rule_digest: str
     content_digest: str
+    coverage: RationaleCoverage
 
     def as_record(self) -> Record:
-        return {"schema_version": 1, **self.__dict__}
+        return {
+            "schema_version": 1,
+            **{key: value for key, value in self.__dict__.items() if key != "coverage"},
+            "coverage": self.coverage.as_record(),
+        }
