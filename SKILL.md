@@ -45,6 +45,14 @@ before opening broad source files:
   --id RECORD_ID --json
 "$SKILL_DIR/bin/architecture-graph" report ROOT --corpus CORPUS_ID
 
+# Optional deterministic rationale overlay
+"$SKILL_DIR/bin/architecture-graph" rationale build ROOT \
+  --corpus CORPUS_ID --json
+"$SKILL_DIR/bin/architecture-graph" rationale status ROOT \
+  --corpus CORPUS_ID --json
+"$SKILL_DIR/bin/architecture-graph" rationale find ROOT \
+  --corpus CORPUS_ID --limit 20 --max-chars 12000 --json
+
 # Phase 1 fallback and exact-record access
 "$SKILL_DIR/bin/architecture-graph" find segments --repo ROOT \
   --corpus CORPUS_ID --contains TERM --limit 20 --max-chars 12000 --json
@@ -62,6 +70,14 @@ an assertion ID to `evidence --for` to retrieve its complete evidence ledger.
 Decision rankings keep navigation, criticality, review priority, extraction
 confidence, corroboration, and completeness independent.
 
+Build a rationale overlay when base decisions report `missing_rationale` but
+the corpus may contain decision-local rationale, context, reasons, or
+justification. The overlay is deterministic, source-backed, separately stored,
+and never rank-eligible. `decisions`, `explain`, and `report` compose a
+compatible current overlay automatically. Use `--base-only` to inspect the
+immutable base interpretation. Treat `base_diagnostics` as the audit trail and
+`active_diagnostics` as the current overlay-aware review state.
+
 Phase 2 analyzes prose and text-native diagrams without requiring JSON. Raster
 images, review mutation, decision lineage, and semantic snapshot diff are not
 implemented.
@@ -73,6 +89,7 @@ implemented.
 - Treat navigation, extraction confidence, corroboration, completeness, criticality, and review priority as independent dimensions.
 - Do not promote an unaccepted proposal into current commitments.
 - Keep generated snapshots separate from the human review ledger.
+- Never treat rationale overlays as graph nodes, edges, or ranking inputs.
 - Open full source files only for the small evidence set returned by bounded commands.
 
 ## Reference

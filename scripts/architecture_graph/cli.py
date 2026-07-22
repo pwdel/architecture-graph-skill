@@ -25,6 +25,9 @@ from architecture_graph.report import ReportLimits, build_report, render_report_
 from architecture_graph.semantic_queries import decisions_query, evidence_query, explain_query, neighbors_query, terms_query
 from architecture_graph.records import RECORD_KIND_BY_TYPE
 from architecture_graph.snapshot import SnapshotReader
+from architecture_graph.overlay_snapshot import RationaleOverlayPaths, RationaleOverlayReader, build_overlay_manifest, publish_rationale_overlay
+from architecture_graph.rationale_resolver import resolve_rationales
+from architecture_graph.overlay_queries import rationale_find_query
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,6 +88,21 @@ def build_parser() -> argparse.ArgumentParser:
     commands.choices["decisions"].add_argument("--score", choices=("navigation", "criticality", "review_priority", "extraction_confidence", "corroboration", "completeness"), default="navigation")
     commands.choices["evidence"].add_argument("--for", dest="record_id", required=True)
     commands.choices["explain"].add_argument("--id", dest="record_id", required=True)
+    for name in ("decisions", "explain", "report"):
+        commands.choices[name].add_argument("--base-only", action="store_true")
+    rationale = commands.add_parser("rationale", help="build and inspect rationale overlays")
+    rationale_commands = rationale.add_subparsers(dest="rationale_command", required=True)
+    for name in ("build", "status", "find"):
+        command = rationale_commands.add_parser(name)
+        command.add_argument("root", type=Path)
+        command.add_argument("--memory-root", type=Path)
+        command.add_argument("--corpus")
+        command.add_argument("--snapshot")
+        command.add_argument("--json", action="store_true")
+        command.add_argument("--max-chars", type=int, default=12_000)
+    rationale_commands.choices["find"].add_argument("--classification", choices=("explicit", "recognized_alias", "ambiguous", "missing"))
+    rationale_commands.choices["find"].add_argument("--limit", type=int, default=20)
+    rationale_commands.choices["find"].add_argument("--cursor")
     return parser
 
 
@@ -182,7 +200,10 @@ def _as_expected(error: Exception) -> ArchitectureGraphError:
         return ArchitectureGraphError("invalid_configuration", str(error))
     if isinstance(error, FileNotFoundError):
         message = str(error)
-        code = "snapshot_not_found" if "snapshot" in message else "corpus_not_found"
+        if "rationale overlay" in message:
+            code = "overlay_not_found"
+        else:
+            code = "snapshot_not_found" if "snapshot" in message else "corpus_not_found"
         return ArchitectureGraphError(code, message)
     if isinstance(error, PermissionError):
         filename = getattr(error, "filename", None)
@@ -204,6 +225,9 @@ def _as_expected(error: Exception) -> ArchitectureGraphError:
         ("current snapshot changed", "publication_conflict"),
         ("same Git worktree", "cross_repository_inputs"),
         ("unsupported explicit source", "unsupported_input"),
+        ("overlay incompatible", "overlay_incompatible"),
+        ("base snapshot changed", "overlay_stale"),
+        ("rationale overlay validation failed", "overlay_validation_failed"),
     )
     for token, code in mappings:
         if token in message:
@@ -243,6 +267,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{payload['snapshot_id']} (corpus {payload['corpus_id']})"
                 )
             return 0
+        if args.command == "rationale":
+            project = _select_project(args.root, args.corpus, args.memory_root)
+            reader = SnapshotReader.open(project, args.snapshot)
+            paths = RationaleOverlayPaths.for_base(project, reader.snapshot_id)
+            if args.rationale_command == "build":
+                result = resolve_rationales(reader)
+                manifest = build_overlay_manifest(reader, result)
+                overlay_id = publish_rationale_overlay(paths, manifest, result, reader)
+                payload = {"overlay_id": overlay_id, "base_snapshot_id": reader.snapshot_id, "coverage": result.coverage.as_record()}
+            else:
+                overlay = RationaleOverlayReader.open(paths, base=reader)
+                records = list(overlay.iter_resolutions())
+                if args.rationale_command == "find":
+                    result = rationale_find_query(
+                        overlay,
+                        classification=args.classification,
+                        limit=args.limit,
+                        max_chars=args.max_chars,
+                        cursor=args.cursor,
+                    )
+                    sys.stdout.write(render_query_envelope(result, "json" if as_json else "markdown"))
+                    return 0
+                else:
+                    payload = {"overlay_id": overlay.overlay_id, "base_snapshot_id": overlay.manifest["base_snapshot_id"], "coverage": overlay.manifest["coverage"]}
+            rendered = canonical_dumps(payload) + "\n"
+            if len(rendered) > args.max_chars: raise ValueError("rationale response exceeds max_chars")
+            sys.stdout.write(rendered)
+            return 0
         if args.command == "memory":
             result = memory_status(
                 args.paths,
@@ -256,8 +308,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command in {"terms", "neighbors", "decisions", "evidence", "explain", "report"}:
             project = _select_project(args.root, args.corpus, args.memory_root)
             reader = SnapshotReader.open(project, args.snapshot)
+            base_only = bool(getattr(args, "base_only", False))
+            overlay_reader = None
+            if not base_only and args.command in {"decisions", "explain", "report"}:
+                overlay_paths = RationaleOverlayPaths.for_base(project, reader.snapshot_id)
+                if overlay_paths.current.is_file():
+                    overlay_reader = RationaleOverlayReader.open(overlay_paths, base=reader)
             if args.command == "report":
-                report = build_report(reader, limits=ReportLimits(max_chars=args.max_chars))
+                report = build_report(reader, limits=ReportLimits(max_chars=args.max_chars), overlay_reader=overlay_reader, base_only=base_only)
                 if as_json:
                     assertions = [{key: value for key, value in item.items() if key != "evidence_ids"} for item in report.assertions]
                     payload = {"coverage": report.coverage, "assertions": assertions}
@@ -272,9 +330,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             common = {"fields": _fields(args.fields), "limit": args.limit, "max_chars": args.max_chars, "cursor": args.cursor}
             if args.command == "terms": result = terms_query(reader, **common)
             elif args.command == "neighbors": result = neighbors_query(reader, node_id=args.node, depth=args.depth, **common)
-            elif args.command == "decisions": result = decisions_query(reader, score=args.score, **common)
+            elif args.command == "decisions": result = decisions_query(reader, score=args.score, overlay_reader=overlay_reader, base_only=base_only, **common)
             elif args.command == "evidence": result = evidence_query(reader, record_id=args.record_id, **common)
-            else: result = explain_query(reader, record_id=args.record_id, **common)
+            else: result = explain_query(reader, record_id=args.record_id, overlay_reader=overlay_reader, base_only=base_only, **common)
             sys.stdout.write(render_query_envelope(result, "json" if as_json else "markdown"))
             return 0
         project = _select_project(args.repo, args.corpus, args.memory_root)

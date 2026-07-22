@@ -17,6 +17,9 @@ def test_capabilities_advertise_only_implemented_phase_two_commands() -> None:
         "index",
         "memory status",
         "neighbors",
+        "rationale build",
+        "rationale find",
+        "rationale status",
         "report",
         "terms",
     ]

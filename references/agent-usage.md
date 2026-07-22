@@ -12,6 +12,9 @@ architecture-graph decisions ROOT --corpus CORPUS_ID --score criticality --limit
 architecture-graph evidence ROOT --corpus CORPUS_ID --for RECORD_ID --json
 architecture-graph explain ROOT --corpus CORPUS_ID --id RECORD_ID --json
 architecture-graph report ROOT --corpus CORPUS_ID
+architecture-graph rationale build ROOT --corpus CORPUS_ID --json
+architecture-graph rationale status ROOT --corpus CORPUS_ID --json
+architecture-graph rationale find ROOT --corpus CORPUS_ID --limit 20 --json
 
 # Exact Phase 1 evidence access remains available
 architecture-graph find segments --repo ROOT --corpus CORPUS_ID \
@@ -46,6 +49,21 @@ two citations, an evidence count, and an appendix assertion ID. Pass that ID to
 `evidence --for ASSERTION_ID` to page the complete evidence ledger. Use
 `explain --id RECORD_ID` for navigation, criticality, review priority,
 extraction confidence, corroboration, and completeness feature vectors.
+
+Rationale overlays are explicit, deterministic enrichments bound to one exact
+base snapshot. Build one after indexing, inspect aggregate coverage with
+`rationale status`, and page compact resolutions with `rationale find`. The
+cursor is bound to the overlay ID, base snapshot, filter, limit, and projection.
+Structured decision-local `rationale`, `context`, `reason`, `reasons`,
+`justification`, and `why` fields are eligible. Explicit Markdown/ADR rationale
+sections are eligible when they can be assigned to one decision without broad
+co-occurrence inference. Document-level `why_now` is not decision rationale.
+
+Composed decision views retain `base_diagnostics`, expose
+`resolved_diagnostics`, and calculate `active_diagnostics`. Use `--base-only`
+on `decisions`, `explain`, or `report` for the original v0.3.1 interpretation.
+An incompatible or stale overlay fails explicitly; it is never silently
+applied or discarded.
 
 Phase 2 supports prose, Markdown ADRs, plaintext, Mermaid, PlantUML, YAML, and
 JSON through one semantic model. It does not interpret images. Capabilities

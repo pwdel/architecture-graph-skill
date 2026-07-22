@@ -29,6 +29,9 @@ The current implementation includes Phase 1 indexing and Phase 2 deterministic a
 - rank the complete selected corpus while returning compact, context-bounded views
 - reconstruct decision objects from prose, ADRs, JSON, and YAML sibling fields
 - separate concise report assertions from paginated evidence appendices
+- recognize source-backed decision rationale through deterministic fields and
+  Markdown/ADR sections without changing the frozen ranking graph
+- publish rationale interpretations as separately versioned, non-ranking overlays
 
 The command surface is:
 
@@ -44,6 +47,9 @@ architecture-graph decisions ROOT --corpus CORPUS_ID --score criticality --json
 architecture-graph evidence ROOT --corpus CORPUS_ID --for RECORD_ID --json
 architecture-graph explain ROOT --corpus CORPUS_ID --id RECORD_ID --json
 architecture-graph report ROOT --corpus CORPUS_ID
+architecture-graph rationale build ROOT --corpus CORPUS_ID --json
+architecture-graph rationale status ROOT --corpus CORPUS_ID --json
+architecture-graph rationale find ROOT --corpus CORPUS_ID --json
 ```
 
 Phase 2 does not interpret raster images and does not include review mutation,
@@ -86,6 +92,16 @@ records, paginated provenance, and independent feature vectors.
 The default report uses at most two representative citations per assertion and
 links each assertion to an evidence appendix ID. This keeps the report useful
 for orientation without discarding the complete source-backed ledger.
+
+Rationale interpretation is additive. The v0.3.1 semantic-schema-v2 base,
+`scoring-v1`, decisions, edges, rankings, and snapshot identity are frozen.
+`rationale build` creates a separate overlay bound to the exact base snapshot
+and ranking digest. It recognizes explicit `rationale` sections and
+decision-local aliases such as `context`, `reason`, and `justification`.
+Every overlay resolution is `rank_eligible: false`; it cannot enter TF-IDF,
+PageRank, or decision scoring. `decisions`, `explain`, and `report` compose a
+compatible current overlay by default while preserving both base and active
+diagnostics. Pass `--base-only` to reproduce the uncomposed base view.
 
 ## Repository Layout
 
@@ -183,6 +199,8 @@ uv run architecture-graph index tests/fixtures/phase1_repo --json
 
 ## Current Status
 
-Version 0.3.1 provides deterministic prose-first evidence graphs with complete-corpus ranking and bounded evidence retrieval. JSON and YAML
-contribute structure but are optional. The next increments may add human review
-and semantic history; image interpretation remains outside the current scope.
+Version 0.4.0 adds deterministic rationale overlays while preserving the
+v0.3.1 ranking baseline. JSON and YAML contribute structure but are optional;
+prose and ADR rationale sections are first-class inputs. Future increments may
+add human review and semantic history; image interpretation remains outside the
+current scope.
