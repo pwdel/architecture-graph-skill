@@ -6,11 +6,14 @@ from test_phase2_golden import _index
 from architecture_graph.indexer import index_corpus
 from architecture_graph.project import ProjectPaths
 from architecture_graph.snapshot import SnapshotReader
+from architecture_graph.rationale_resolver import resolve_rationales
 from architecture_graph.overlay_contract import (
     validate_rationale_overlay,
     validate_rationale_resolution,
 )
 import pytest
+import json
+from conftest import git, ignore_architecture_graph
 
 
 def test_repeated_index_preserves_frozen_base(tmp_path: Path) -> None:
@@ -33,18 +36,8 @@ def test_frozen_scoring_contract_remains_v1(tmp_path: Path) -> None:
 
 def test_resolution_contract_rejects_ranking_and_stale_decision(tmp_path: Path) -> None:
     reader = _index(tmp_path / "repo")
-    decision = next(reader.iter("decisions"))
-    evidence_id = decision["evidence_ids"][0]
-    record = {
-        "id": "rationale-resolution:test", "kind": "rationale_resolution",
-        "schema_version": 1, "base_snapshot_id": reader.snapshot_id,
-        "decision_id": decision["id"], "decision_content_digest": decision["content_digest"],
-        "normalized_role": "rationale", "observed_roles": ["context"],
-        "classification": "recognized_alias", "evidence_ids": [evidence_id],
-        "resolves_diagnostics": ["missing_rationale"], "rule_version": "rationale-rules-v1",
-        "rank_eligible": False, "derivation_ids": decision["derivation_ids"],
-    }
-    assert validate_rationale_resolution(record, reader) == ()
+    record = next(item for item in resolve_rationales(reader).resolutions if item["classification"] != "missing")
+    assert validate_rationale_resolution(record, reader, frozenset(record["derivation_ids"])) == ()
     assert validate_rationale_resolution({**record, "rank_eligible": True}, reader)
     assert validate_rationale_resolution({**record, "decision_content_digest": "sha256:" + "0" * 64}, reader)
 
@@ -72,16 +65,25 @@ def test_overlay_rejects_base_semantic_record_kinds(tmp_path: Path) -> None:
 )
 def test_resolution_rejects_inconsistent_classification_semantics(tmp_path: Path, change) -> None:
     reader = _index(tmp_path / "repo")
-    decision = next(reader.iter("decisions"))
-    record = {
-        "id": "rationale-resolution:test", "kind": "rationale_resolution",
-        "schema_version": 1, "base_snapshot_id": reader.snapshot_id,
-        "decision_id": decision["id"], "decision_content_digest": decision["content_digest"],
-        "normalized_role": "rationale", "observed_roles": ["context"],
-        "classification": "recognized_alias", "evidence_ids": [decision["evidence_ids"][0]],
-        "resolves_diagnostics": ["missing_rationale"], "rule_version": "rationale-rules-v1",
-        "rank_eligible": False, "derivation_ids": decision["derivation_ids"],
-    }
+    record = next(item for item in resolve_rationales(reader).resolutions if item["classification"] != "missing")
     if change.get("evidence_ids") == ["keep"]:
         change = {**change, "evidence_ids": record["evidence_ids"]}
     assert validate_rationale_resolution({**record, **change}, reader)
+
+
+def test_resolution_rejects_same_source_evidence_from_another_decision(architecture_repo) -> None:
+    path = architecture_repo / "architecture" / "plan.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"decision_log": [
+        {"decision": "Use adapters", "context": "Centralize contracts"},
+        {"decision": "Use ports", "context": "Keep infrastructure replaceable"},
+    ]}))
+    git(architecture_repo, "add", "architecture/plan.json")
+    git(architecture_repo, "commit", "-m", "plan")
+    ignore_architecture_graph(architecture_repo)
+    indexed = index_corpus((path,))
+    reader = SnapshotReader.open(ProjectPaths.for_corpus(indexed.selection))
+    resolutions = list(resolve_rationales(reader).resolutions)
+    forged = {**resolutions[0], "evidence_ids": resolutions[1]["evidence_ids"]}
+    issues = validate_rationale_resolution(forged, reader, frozenset(forged["derivation_ids"]))
+    assert any(issue.field == "evidence_ids" and "decision-local" in issue.message for issue in issues)

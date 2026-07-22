@@ -57,17 +57,16 @@ def validate_rationale_resolution(record: Mapping[str, object], base: SnapshotRe
         or "missing_rationale" not in decision.get("diagnostic_codes", [])
     ):
         issues.append(ValidationIssue("resolves_diagnostics", "does not match the base decision diagnostic"))
-    decision_source_ids = set()
+    eligible_evidence_ids: frozenset[str] = frozenset()
     if decision is not None:
-        for decision_evidence_id in decision.get("evidence_ids", []):
-            decision_evidence = base.get("evidence", str(decision_evidence_id))
-            if decision_evidence is not None:
-                decision_source_ids.add(str(decision_evidence["source_version_id"]))
+        from architecture_graph.rationale_resolver import eligible_rationale_evidence_ids
+
+        eligible_evidence_ids = eligible_rationale_evidence_ids(base, decision)
     for evidence_id in record["evidence_ids"] if isinstance(record["evidence_ids"], list) else []:
         evidence = base.get("evidence", str(evidence_id))
         if evidence is None:
             issues.append(ValidationIssue("evidence_ids", f"missing reference: {evidence_id}"))
-        elif str(evidence["source_version_id"]) not in decision_source_ids:
+        elif str(evidence_id) not in eligible_evidence_ids:
             issues.append(ValidationIssue("evidence_ids", f"is not decision-local: {evidence_id}"))
     for derivation_id in record["derivation_ids"] if isinstance(record["derivation_ids"], list) else []:
         if base.get("derivations", str(derivation_id)) is None and str(derivation_id) not in overlay_derivation_ids: issues.append(ValidationIssue("derivation_ids", f"missing reference: {derivation_id}"))

@@ -11,6 +11,40 @@ from architecture_graph.records import Record, finalize_record
 from architecture_graph.snapshot import SnapshotReader
 
 
+def eligible_rationale_evidence_ids(base: SnapshotReader, decision: Record) -> frozenset[str]:
+    rules = load_rationale_rules()
+    aliases = set(rules["aliases"])
+    sources = {
+        str(evidence["source_version_id"])
+        for evidence_id in decision.get("evidence_ids", [])
+        if (evidence := base.get("evidence", str(evidence_id))) is not None
+    }
+    scope = tuple(str(value) for value in decision.get("scope", []))
+    parent = "/" + "/".join(scope) if scope else ""
+    prose_owner = scope[:-1] if scope and scope[-1].casefold() == "decision" else scope
+    eligible = {str(value) for value in decision.get("rationale_evidence_ids", [])}
+    for segment in base.iter("segments"):
+        if str(segment.get("source_version_id")) not in sources:
+            continue
+        metadata = segment.get("metadata", {})
+        pointer = metadata.get("json_pointer") if isinstance(metadata, dict) else None
+        if isinstance(pointer, str) and "/" in pointer:
+            candidate_parent, role = pointer.rsplit("/", 1)
+            if candidate_parent == parent and role in aliases:
+                eligible.update(str(value) for value in segment.get("evidence_ids", []))
+        heading_path = segment.get("heading_path", [])
+        if (
+            decision.get("anchor_kind") == "decision_heading"
+            and isinstance(heading_path, list)
+            and heading_path
+            and tuple(str(value) for value in heading_path[:-1]) == prose_owner
+            and str(heading_path[-1]).strip().casefold() in aliases
+            and segment.get("segment_kind") not in {"heading", "metadata_field"}
+        ):
+            eligible.update(str(value) for value in segment.get("evidence_ids", []))
+    return frozenset(eligible)
+
+
 def resolve_rationales(base: SnapshotReader) -> RationaleOverlayResult:
     rules = load_rationale_rules()
     aliases = dict(rules["aliases"])
@@ -71,16 +105,18 @@ def resolve_rationales(base: SnapshotReader) -> RationaleOverlayResult:
         eligible = explicit_candidates or candidates
         roles = sorted({role for role, _, _ in eligible})
         evidence_ids = sorted({evidence for _, evidence, _ in eligible})
-        scope_keys = {scope_key for _, _, scope_key in eligible}
-        normalized_texts = {
-            " ".join(str(evidence.get("text", "")).casefold().split())
-            for evidence_id in evidence_ids
-            if (evidence := base.get("evidence", evidence_id)) is not None
-        }
+        candidate_groups: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for role, evidence_id, scope_key in eligible:
+            evidence = base.get("evidence", evidence_id)
+            if evidence is not None:
+                candidate_groups[(role, scope_key)].add(
+                    " ".join(str(evidence.get("text", "")).casefold().split())
+                )
+        incompatible = len({tuple(sorted(values)) for values in candidate_groups.values()}) > 1
         if "rationale" in roles:
-            classification = "ambiguous" if len(scope_keys) > 1 and len(normalized_texts) > 1 else "explicit"
+            classification = "ambiguous" if incompatible else "explicit"
         elif roles:
-            classification = "ambiguous" if len(scope_keys) > 1 and len(normalized_texts) > 1 else "recognized_alias"
+            classification = "ambiguous" if incompatible else "recognized_alias"
         else:
             classification = "missing"
         counts[classification] += 1

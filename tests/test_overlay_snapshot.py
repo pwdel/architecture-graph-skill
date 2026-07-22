@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import pytest
 from dataclasses import replace
+from architecture_graph.records import finalize_record
 
 from architecture_graph.overlay_snapshot import (
     RationaleOverlayPaths,
@@ -56,3 +57,17 @@ def test_invalid_manifest_is_rejected_before_overlay_directory_is_published(tmp_
     with pytest.raises(ValueError, match="overlay validation failed"):
         publish_rationale_overlay(paths, invalid, result, reader)
     assert not (paths.snapshots / invalid.overlay_id.replace(":", "-")).exists()
+
+
+def test_dangling_overlay_derivation_is_rejected_before_staging(tmp_path: Path) -> None:
+    reader = _index(tmp_path / "repo")
+    paths = RationaleOverlayPaths.for_base(reader.project, reader.snapshot_id)
+    result = resolve_rationales(reader)
+    raw = {key: value for key, value in result.derivations[0].items() if key != "content_digest"}
+    raw["input_ids"] = ["evidence:missing"]
+    derivation = finalize_record(raw)
+    forged = replace(result, derivations=(derivation, *result.derivations[1:]))
+    manifest = build_overlay_manifest(reader, forged)
+    with pytest.raises(ValueError, match="derivation input_ids"):
+        publish_rationale_overlay(paths, manifest, forged, reader)
+    assert not paths.snapshots.exists()

@@ -25,7 +25,7 @@ def test_context_sibling_resolves_missing_rationale(architecture_repo) -> None:
     assert result.resolutions[0]["resolves_diagnostics"] == ["missing_rationale"]
 
 
-@pytest.mark.parametrize("roles", [("reason",), ("context", "justification")])
+@pytest.mark.parametrize("roles", [("reason",)])
 def test_structured_aliases_are_compatible(architecture_repo, roles) -> None:
     path = architecture_repo / "architecture" / "plan.json"
     path.parent.mkdir()
@@ -40,6 +40,20 @@ def test_structured_aliases_are_compatible(architecture_repo, roles) -> None:
     resolution = resolve_rationales(reader).resolutions[0]
     assert resolution["classification"] == "recognized_alias"
     assert resolution["observed_roles"] == sorted(roles)
+
+
+def test_different_alias_passages_in_one_parent_are_ambiguous(architecture_repo) -> None:
+    path = architecture_repo / "architecture" / "plan.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"decision_log": [{"decision": "Use adapters", "context": "Centralize contracts", "justification": "Permit vendor switching"}]}))
+    git(architecture_repo, "add", str(path.relative_to(architecture_repo)))
+    git(architecture_repo, "commit", "-m", "plan")
+    ignore_architecture_graph(architecture_repo)
+    indexed = index_corpus((path,))
+    reader = SnapshotReader.open(ProjectPaths.for_corpus(indexed.selection))
+    resolution = resolve_rationales(reader).resolutions[0]
+    assert resolution["classification"] == "ambiguous"
+    assert resolution["resolves_diagnostics"] == []
 
 
 def test_markdown_rationale_section_resolves_single_adr(architecture_repo) -> None:

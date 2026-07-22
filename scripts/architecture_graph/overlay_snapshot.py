@@ -11,7 +11,7 @@ from architecture_graph.jsonl_store import iter_records, write_records
 from architecture_graph.overlay_contract import validate_rationale_overlay
 from architecture_graph.overlay_types import RationaleOverlayManifest, RationaleOverlayResult
 from architecture_graph.project import ProjectLock, ProjectPaths
-from architecture_graph.records import validate_record
+from architecture_graph.records import RECORD_TYPES, validate_record
 from architecture_graph.snapshot import SnapshotReader
 from architecture_graph.rationale_rules import rationale_rule_digest
 
@@ -125,12 +125,49 @@ def _assert_base_unchanged(base: SnapshotReader, manifest: RationaleOverlayManif
         raise ValueError("base snapshot changed")
 
 
+def _validate_overlay_provenance(base: SnapshotReader, result: RationaleOverlayResult) -> None:
+    base_ids = {
+        str(record["id"])
+        for record_type in RECORD_TYPES
+        for record in base.iter(record_type)
+    }
+    resolution_ids = {str(record["id"]) for record in result.resolutions}
+    derivation_ids = {str(record["id"]) for record in result.derivations}
+    warning_ids = {str(record["id"]) for record in result.warnings}
+    known_ids = base_ids | resolution_ids | derivation_ids | warning_ids
+    for derivation in result.derivations:
+        missing = sorted(
+            str(value)
+            for value in derivation.get("input_ids", [])
+            if str(value) not in known_ids
+        )
+        if missing:
+            raise ValueError(
+                f"rationale overlay validation failed: derivation input_ids: missing reference: {missing[0]}"
+            )
+    base_source_ids = {str(record["id"]) for record in base.iter("sources")}
+    base_derivation_ids = {str(record["id"]) for record in base.iter("derivations")}
+    for warning in result.warnings:
+        source_id = warning.get("source_version_id")
+        if source_id is not None and str(source_id) not in base_source_ids:
+            raise ValueError(
+                f"rationale overlay validation failed: warning source_version_id: missing reference: {source_id}"
+            )
+        for derivation_id in warning.get("derivation_ids", []):
+            if str(derivation_id) not in derivation_ids | base_derivation_ids:
+                raise ValueError(
+                    f"rationale overlay validation failed: warning derivation_ids: missing reference: {derivation_id}"
+                )
+
+
 def publish_rationale_overlay(paths: RationaleOverlayPaths, manifest: RationaleOverlayManifest, result: RationaleOverlayResult, base: SnapshotReader) -> str:
+    _assert_base_unchanged(base, manifest)
     issues = validate_rationale_overlay(result.resolutions, base, result.derivations)
     if issues:
         raise ValueError(f"rationale overlay validation failed: {issues[0].field}: {issues[0].message}")
     for record in (*result.derivations, *result.warnings):
         validate_record(record)
+    _validate_overlay_provenance(base, result)
     actual_counts = {
         name: sum(1 for item in result.resolutions if item.get("classification") == name)
         for name in ("explicit", "recognized_alias", "ambiguous", "missing")
@@ -141,7 +178,6 @@ def publish_rationale_overlay(paths: RationaleOverlayPaths, manifest: RationaleO
         "warnings": len(result.warnings),
     }:
         raise ValueError("rationale overlay validation failed: coverage: does not match records")
-    _assert_base_unchanged(base, manifest)
     if manifest != build_overlay_manifest(base, result):
         raise ValueError("rationale overlay validation failed: manifest: does not match content")
     with ProjectLock(base.project.lock_path):
