@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import subprocess
 
-from architecture_graph import __version__
 from architecture_graph.analysis import analyze_catalog
 from architecture_graph.analysis_types import RecordCatalog
 from architecture_graph.canonical import (
@@ -31,7 +30,7 @@ from architecture_graph.corpus import (
     resolve_corpus,
     write_corpus_metadata,
 )
-from architecture_graph.fingerprint import pipeline_fingerprint
+from architecture_graph.fingerprint import BASE_PIPELINE_VERSION, pipeline_fingerprint
 from architecture_graph.ingest import IngestionContext, IngestionResult, ingest_sources
 from architecture_graph.ingest.diagrams import warning_record
 from architecture_graph.jsonl_store import get_record
@@ -762,7 +761,7 @@ def index_repository(
     pipeline = pipeline_fingerprint()
     pipeline_digest = pipeline.digest
     context = IngestionContext(
-        config_digest, pipeline_digest, __version__, config.max_segment_chars
+        config_digest, pipeline_digest, BASE_PIPELINE_VERSION, config.max_segment_chars
     )
     material_digest = material_input_digest(inputs, config, pipeline_digest)
     revision_digest = source_revision_digest(item.content_hash for item in inputs)
@@ -854,7 +853,7 @@ def index_repository(
     analyzed = analyze_catalog(
         phase1_catalog,
         model_name=config.spacy_model,
-        tool_version=__version__,
+        tool_version=BASE_PIPELINE_VERSION,
         configuration_digest=config_digest,
         pipeline_digest=pipeline_digest,
     ).records_by_type()
