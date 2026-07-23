@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,3 +81,41 @@ def test_v040_readme_names_algorithms_and_provenance() -> None:
 def test_companion_links_to_long_form_reference() -> None:
     text = COMPANION.read_text()
     assert "README/architecture-v0.4.0.md" in text
+
+
+def test_diagram_exposes_provenance_categories_and_algorithm_registry() -> None:
+    text = DIAGRAM.read_text()
+    for value in (*PROVENANCE_LABELS, *ALGORITHM_LABELS):
+        assert value in text
+    assert "v0.4.0 makes no internal LLM calls" in text
+    assert 'data-provenance="human optional-external-llm"' in text
+    assert text.count('data-provenance="deterministic"') == 8
+
+
+def test_every_flow_step_declares_provenance_and_method() -> None:
+    text = DIAGRAM.read_text()
+    flow_source = text.split("const flows = {", 1)[1].split("const SINGLE_MODE", 1)[0]
+    step_count = len(re.findall(r'\{\s*from:"', flow_source))
+    provenance_count = len(
+        re.findall(
+            r'provenance:"(?:Deterministic|Optional external LLM|Human/control)"',
+            flow_source,
+        )
+    )
+    method_count = len(re.findall(r'method:"[^"]+"', flow_source))
+    assert step_count == 25
+    assert provenance_count == step_count
+    assert method_count == step_count
+    assert flow_source.count('provenance:"Human/control"') == 4
+    assert flow_source.count('provenance:"Deterministic"') == 21
+    assert 'provenance:"Optional external LLM"' not in flow_source
+
+
+def test_diagram_keeps_existing_topology_and_offline_contract() -> None:
+    text = DIAGRAM.read_text()
+    assert text.count('<div class="node" data-role=') == 9
+    assert len(
+        re.findall(r'<button class="flowtab" data-flow="[^"]+" aria-pressed=', text)
+    ) == 5
+    assert "https://fonts.googleapis.com" not in text
+    assert "<script src=" not in text
