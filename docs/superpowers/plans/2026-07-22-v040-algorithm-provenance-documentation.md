@@ -284,7 +284,7 @@ Internal nodes render one `Deterministic` badge. Add CSS tokens and light-theme 
 
 - [ ] **Step 4: Add algorithm and provenance fields to all 25 steps**
 
-Extend the documented flow-step schema with required `provenance` and `method` fields. Use `Human/control` for explicit command invocation or authorization handoffs, `Optional external LLM` only when a returned result reaches the caller for optional interpretation, and `Deterministic` for all internal processing and built-in rendering steps.
+Extend the documented flow-step schema with required `provenance` and `method` fields. Use `Human/control` for explicit command invocation or authorization handoffs and `Deterministic` for processing, built-in rendering, and delivery of results. Do not label a delivery step `Optional external LLM`: optional LLM interpretation starts only after delivery and is represented by the caller node and provenance legend, outside the 25 tool-executed steps.
 
 Use these method labels at the relevant internal steps:
 
@@ -306,7 +306,7 @@ Stable Bounded Projection
 Cited Report Composition
 ```
 
-Where one step covers several analysis algorithms, join their exact names with ` · ` in `method`; do not create extra flow steps or change endpoint order. Use `Write Authorization Gate` and `Engineering Review / Agent-Assisted Interpretation` for governance or external handoffs, but do not call them algorithms in descriptions.
+Where one step covers several analysis algorithms, join their exact names with ` · ` in `method`; do not create extra flow steps or change endpoint order. Use `Write Authorization Gate` for an authorized mutation, `Deterministic Result Handoff` for delivery, and describe engineering review or agent-assisted interpretation only as activity after that handoff. Do not call governance or external interpretation an algorithm.
 
 - [ ] **Step 5: Render step provenance and method in the details panel**
 
