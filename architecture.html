@@ -315,7 +315,12 @@
     color: var(--c-orch);
   }
   .node .provenance-badges{
-    display:flex; flex-wrap:wrap; gap:3px; margin-top:7px;
+    position:absolute; top:5px; right:5px; z-index:3;
+    display:flex; flex-direction:column; flex-wrap:nowrap; align-items:flex-end;
+    gap:2px; margin:0; pointer-events:none;
+  }
+  .node .provenance-badges .provenance{
+    padding:2px 4px; font-size:6.5px; white-space:nowrap;
   }
   .node .icon{
     width: 28px; height: 28px; border-radius: 8px;
@@ -793,7 +798,7 @@
         <div class="label">Agent / engineer</div>
         <div class="tech">human + optional external LLM</div>
         <div class="port">invokes CLI</div>
-        <div class="provenance-badges" aria-label="Provenance"><span class="provenance human">Human/control</span><span class="provenance llm">Optional external LLM</span></div>
+        <div class="provenance-badges" aria-label="Provenance: Human/control and Optional external LLM"><span class="provenance human" title="Human/control">Human</span><span class="provenance llm" title="Optional external LLM">Ext. LLM</span></div>
         <span class="step-badge">·</span>
       </div>
 

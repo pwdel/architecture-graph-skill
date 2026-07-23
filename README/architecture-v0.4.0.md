@@ -154,7 +154,9 @@ The indexer validates semantic-schema-2 records and their references before
 publication. It serializes canonical JSONL records, calculates content
 digests, writes a manifest, and advances the corpus's current pointer only
 after all files pass integrity checks. Identical deterministic inputs produce
-the same snapshot identity. A published base snapshot never changes.
+the same snapshot identity only within the same project, corpus selection, configuration, pipeline, and analysis history. Project identity includes the
+absolute project root, and logical source identity can include the parent
+snapshot. A published base snapshot never changes.
 
 Source evidence and derivation records remain in the same base, so an engineer
 can trace a term, claim, edge, decision, or score back to exact source spans and
@@ -175,8 +177,8 @@ the same view.
 
 ## Rationale overlays
 
-Decision-Local Rationale Resolution reads base decisions, evidence,
-diagnostics, scopes, and derivations. `rationale-rules-v1` recognizes explicit
+Decision-Local Rationale Resolution reads base decisions, segments, evidence,
+diagnostics, and scopes. `rationale-rules-v1` recognizes explicit
 `rationale` fields and approved aliases such as `context`, `justification`,
 `reason`, and `why_now`. It classifies each decision as `explicit`,
 `recognized_alias`, `ambiguous`, or `missing`.

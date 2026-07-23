@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +77,10 @@ def test_v040_readme_names_algorithms_and_provenance() -> None:
     assert "damping factor of `0.85`" in text
     assert "24 iterations" in text
     assert "rank_eligible: false" in text
+    assert (
+        "same project, corpus selection, configuration, pipeline, and analysis history"
+        in text
+    )
 
 
 def test_companion_links_to_long_form_reference() -> None:
@@ -119,3 +124,49 @@ def test_diagram_keeps_existing_topology_and_offline_contract() -> None:
     ) == 5
     assert "https://fonts.googleapis.com" not in text
     assert "<script src=" not in text
+
+
+def test_inline_javascript_parses_and_flow_endpoints_resolve() -> None:
+    text = DIAGRAM.read_text()
+    script = text.split("<script>", 1)[1].split("</script>", 1)[0]
+    result = subprocess.run(
+        ["node", "--check", "-"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    node_ids = set(re.findall(r'data-id="([^"]+)"', text))
+    endpoints = re.findall(r'\{\s*from:"([^"]+)",\s*to:"([^"]+)"', script)
+    assert len(endpoints) == 25
+    assert {value for pair in endpoints for value in pair} <= node_ids
+
+    flow_keys = set(re.findall(r'^  ([a-z_]+): \{\n    name:', script, re.MULTILINE))
+    tab_keys = set(
+        re.findall(r'class="flowtab" data-flow="([^"]+)" aria-pressed=', text)
+    )
+    assert flow_keys == tab_keys
+
+
+def test_panel_bindings_and_external_resource_boundary() -> None:
+    text = DIAGRAM.read_text()
+    for panel_id in ("panelProvenance", "panelMethod", "stepAnnouncement"):
+        assert f'id="{panel_id}"' in text
+        assert f'getElementById("{panel_id}")' in text
+    assert "panelProvenance.textContent = step.provenance" in text
+    assert "panelMethod.textContent = step.method" in text
+    assert re.search(
+        r'(?:src|href)=["\'](?:https?:)?//|url\(\s*["\']?https?://|fetch\(\s*["\']https?://',
+        text,
+    ) is None
+
+
+def test_node_provenance_badges_do_not_change_node_geometry() -> None:
+    text = DIAGRAM.read_text()
+    rule = re.search(r'\.node \.provenance-badges\{(?P<body>.*?)\n  \}', text, re.DOTALL)
+    assert rule is not None
+    body = rule.group("body")
+    assert "position:absolute" in body
+    assert "flex-wrap:nowrap" in body
