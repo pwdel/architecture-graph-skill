@@ -58,7 +58,7 @@ ALGORITHM_LABELS = (
     "Rule Tokenization",
     "Sparse TF-IDF Term Discovery",
     "Controlled SVO Relation Extraction",
-    "Rule-Based Entity Resolution",
+    "Exact-Key Entity Resolution",
     "Relation Qualification",
     "Decision Candidate Extraction",
     "Decision Reduction",
@@ -106,6 +106,7 @@ def test_v040_readme_names_algorithms_and_provenance() -> None:
         "`predicates-v1`",
         "`extraction-rules-en-v1`",
         "`entity-rules-v1`",
+        "`exact_entity_key`",
         "`decision-rules-v1`",
         "`decision_reducer`",
         "`scoring-v1`",
@@ -162,7 +163,8 @@ Complete the remaining required sections with the approved registry. For each al
 
 - `index` performs ingestion, semantic analysis, graph construction, scoring, validation, and publication in one operation;
 - Sparse TF-IDF uses term frequency and inverse document frequency over the complete selected corpus;
-- Controlled SVO extraction uses canonical predicate surfaces rather than an LLM parser;
+- Controlled SVO extraction directly uses canonical surfaces from `predicates-v1` plus fixed code rules rather than an LLM parser;
+- Exact-Key Entity Resolution records `exact_entity_key`; `extraction-rules-en-v1` and `entity-rules-v1` are advertised pipeline resources but are not directly loaded by the current relation extractor or entity resolver;
 - Typed Evidence Graph Construction emits `CONTAINS`, `MENTIONS`, `ASSERTS`, `SUBJECT_OF`, `OBJECT_OF`, and `SUPPORTS` edges;
 - PageRank uses a damping factor of `0.85` and 24 iterations;
 - `scoring-v1` keeps navigation, criticality, review priority, extraction confidence, corroboration, and completeness independent;
@@ -292,7 +294,7 @@ Use these method labels at the relevant internal steps:
 Rule Tokenization
 Sparse TF-IDF Term Discovery
 Controlled SVO Relation Extraction
-Rule-Based Entity Resolution
+Exact-Key Entity Resolution
 Relation Qualification
 Decision Candidate Extraction
 Decision Reduction

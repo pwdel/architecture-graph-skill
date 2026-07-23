@@ -36,8 +36,8 @@ compatibility contracts.
 | --- | --- | --- | --- | --- |
 | Text parsing | Rule Tokenization | `rule_tokenizer` | Deterministic | Existing derivation name |
 | Term extraction | Sparse TF-IDF Term Discovery | `sparse_tfidf`, `terms-en-v1` | Deterministic | Existing derivation and resource identifiers |
-| SVO extraction | Controlled SVO Relation Extraction | `predicates-v1`, `extraction-rules-en-v1` | Deterministic | Descriptive name over existing rule resources |
-| Entity resolution | Rule-Based Entity Resolution | `entity-rules-v1` | Deterministic | Descriptive name over an existing resource identifier |
+| SVO extraction | Controlled SVO Relation Extraction | `predicates-v1` plus fixed code rules | Deterministic | Descriptive name over the directly loaded rule resource |
+| Entity resolution | Exact-Key Entity Resolution | `exact_entity_key` | Deterministic | Existing derivation name |
 | Modality and status | Relation Qualification | Fixed qualifier rules | Deterministic | Descriptive implementation label |
 | Decision discovery | Decision Candidate Extraction | `decision-rules-v1` | Deterministic | Descriptive name over an existing resource identifier |
 | Decision normalization | Decision Reduction | `decision_reducer` | Deterministic | Existing derivation name |

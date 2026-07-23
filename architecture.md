@@ -2,6 +2,10 @@
 
 Architecture Graph turns an inspected repository into deterministic, evidence-backed architecture memory. The interactive [architecture.html](architecture.html) shows the same system as five clickable flows; this guide is the standalone explanation of its components, records, publication rules, and boundaries.
 
+The long-form [v0.4.0 architecture reference](README/architecture-v0.4.0.md)
+documents algorithm identifiers, deterministic provenance, the optional
+external-LLM boundary, and human governance controls.
+
 ## Components
 
 | Component | Modules | Responsibility | Key invariant |
